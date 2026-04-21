@@ -21,7 +21,7 @@ def generate_launch_description():
             # our custom Nav2 params
             'params_file': nav2_params,
             # tell bringup to use SLAM instead of localization+map_server
-            'slam': 'True',
+            'slam': 'False',
             # still required as a launch argument, but not used when slam=True
             'map': ''
         }.items()
