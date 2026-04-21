@@ -1,0 +1,5 @@
+multiplexer:
+  ros__parameters:
+    cmd_joystick_topic: "cmd_vel_joystick"
+    cmd_nav_topic: "cmd_vel_nav"
+    cmd_output_topic: "cmd_vel"
