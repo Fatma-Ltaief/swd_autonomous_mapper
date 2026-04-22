@@ -357,7 +357,7 @@ Nav2 replaces the simple `wander_avoid` behavior with **intelligent navigation**
 
 Nav2 can run **with SLAM (mapping mode)** or **with a saved map**.
 
-#### Option A — With SLAM (recommended now)
+#### Option A — With SLAM
 
 ```bash
 ros2 launch nav2_bringup navigation_launch.py use_sim_time:=false
@@ -455,4 +455,86 @@ These are defined in Nav2 config YAML files.
 * TF missing `map → odom`
 
 ---
+## 13. Autonomous Exploration (Frontier-Based)
 
+This section explains how to run the **working autonomous frontier-based exploration baseline** on the real robot.
+
+The current pipeline is:
+
+- robot base already running
+- `slam_toolbox` for online mapping
+- Nav2 for planning and control
+- `nav2_wavefront_frontier_exploration` for automatic frontier selection
+
+The robot will:
+
+- build the map online
+- detect frontiers from unknown map regions
+- send navigation goals automatically
+- continue until no more frontiers remain
+
+---
+Terminal 1: SLAM
+```bash
+export ROS_DOMAIN_ID=40
+source /opt/ros/humble/setup.bash
+source ~/ws-ros2/install/setup.bash
+
+ros2 launch slam_toolbox online_async_launch.py
+```
+This starts online SLAM and publishes:
+* /map
+* /map_updates
+* map -> odom
+
+Terminal 2: Nav2
+```bash
+export ROS_DOMAIN_ID=40
+source /opt/ros/humble/setup.bash
+source ~/ws-ros2/install/setup.bash
+
+ros2 launch swd_nav2 nav2_with_slam.launch.py
+```
+This starts the navigation stack, including:
+
+* planner
+* controller
+* behavior tree navigator
+* local and global costmaps
+* waypoint follower
+Terminal 3: RViz
+```bash
+export ROS_DOMAIN_ID=40
+source /opt/ros/humble/setup.bash
+source ~/ws-ros2/install/setup.bash
+
+rviz2
+```
+Recommended RViz displays:
+
+* Map
+* TF
+* LaserScan
+* Path on /plan
+* Path on /local_plan
+
+Set:
+
+Fixed Frame = map
+Terminal 4: Frontier Exploration
+``` bash
+export ROS_DOMAIN_ID=40
+source /opt/ros/humble/setup.bash
+source ~/ws-ros2/install/setup.bash
+
+ros2 run nav2_wfd explore
+```
+This starts the frontier exploration node.
+
+The node:
+
+* listens to /map
+* gets robot pose from /odom
+* detects frontier regions
+* sends waypoint goals to Nav2
+* repeats until exploration is finished
