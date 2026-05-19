@@ -28,7 +28,6 @@
   </material>
 
   <material name="acrylic_clear">
-    <!-- transparent top plate -->
     <color rgba="0.95 0.95 0.95 0.25"/>
   </material>
 
@@ -37,26 +36,22 @@
 
   <joint name="base_joint" type="fixed">
     <parent link="base_footprint"/>
-    <child link="base_link" />
+    <child link="base_link"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
 
-  <!-- ========= BASE LINK (METAL BODY + TOP PLATE) ========= -->
+  <!-- ========= BASE LINK ========= -->
   <link name="base_link">
-    <!-- main body mesh -->
     <visual>
-      <origin xyz="-0.46 -0.27 0.0" rpy="0 0 0" />
+      <origin xyz="-0.46 -0.27 0.0" rpy="0 0 0"/>
       <geometry>
-        <mesh
-            filename="package://swd_starter_kit_description/meshes/starter_kit_base.stl"
-            scale="0.001 0.001 0.001" />
+        <mesh filename="file:///home/fatma/autonomous_slam_baseline/src/swd_starter_kit_description/meshes/starter_kit_base.stl"
+              scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="body_dark_grey"/>
     </visual>
 
-    <!-- simple transparent top plate (approximation of acrylic cover) -->
     <visual>
-      <!-- adjust xyz/size if you want it tighter -->
       <origin xyz="-0.05 0 0.18" rpy="0 0 0"/>
       <geometry>
         <box size="0.55 0.40 0.01"/>
@@ -65,11 +60,10 @@
     </visual>
 
     <collision>
-      <origin xyz="-0.46 -0.27 0.0" rpy="0 0 0" />
+      <origin xyz="-0.46 -0.27 0.0" rpy="0 0 0"/>
       <geometry>
-        <mesh
-            filename="package://swd_starter_kit_description/meshes/starter_kit_base.stl"
-            scale="0.001 0.001 0.001"/>
+        <mesh filename="file:///home/fatma/autonomous_slam_baseline/src/swd_starter_kit_description/meshes/starter_kit_base.stl"
+              scale="0.001 0.001 0.001"/>
       </geometry>
     </collision>
 
@@ -78,24 +72,24 @@
       <mass value="27"/>
       <inertia ixx="0.70673" ixy="0.0" ixz="0.0"
                iyy="0.70673" iyz="0.0"
-               izz="1.31220" />
+               izz="1.31220"/>
     </inertial>
   </link>
 
   <!-- ========= DRIVE WHEELS ========= -->
   <joint name="base_swd_left_joint" type="continuous">
-    <parent link="base_link" />
-    <child link="swd_left_link" />
-    <origin xyz="0.0 0.25 0.08" rpy="-1.57 0 0" />
-    <axis xyz="0 0 1" />
+    <parent link="base_link"/>
+    <child link="swd_left_link"/>
+    <origin xyz="0.0 0.25 0.08" rpy="-1.57 0 0"/>
+    <axis xyz="0 0 1"/>
   </joint>
 
   <link name="swd_left_link">
     <visual>
       <origin xyz="0 0 0" rpy="1.57 0 0"/>
       <geometry>
-        <mesh filename="package://swd_starter_kit_description/meshes/wheels/starter_kit_left_tire.stl"
-               scale="0.001 0.001 0.001"/>
+        <mesh filename="file:///home/fatma/autonomous_slam_baseline/src/swd_starter_kit_description/meshes/wheels/starter_kit_left_tire.stl"
+              scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="wheel_orange"/>
     </visual>
@@ -108,27 +102,27 @@
     </collision>
 
     <inertial>
-      <origin xyz="0 0 0" />
-      <mass value="1" />
+      <origin xyz="0 0 0"/>
+      <mass value="1"/>
       <inertia ixx="0.00111" ixy="0.0" ixz="0.0"
                iyy="0.00111" iyz="0.0"
-               izz="0.00198" />
+               izz="0.00198"/>
     </inertial>
   </link>
 
   <joint name="base_swd_right_joint" type="continuous">
-    <parent link="base_link" />
-    <child link="swd_right_link" />
-    <origin xyz="0.0 -0.25 0.08" rpy="-1.57 0 0" />
-    <axis xyz="0 0 1" />
+    <parent link="base_link"/>
+    <child link="swd_right_link"/>
+    <origin xyz="0.0 -0.25 0.08" rpy="-1.57 0 0"/>
+    <axis xyz="0 0 1"/>
   </joint>
 
   <link name="swd_right_link">
     <visual>
       <origin xyz="0 0 0" rpy="1.57 0 0"/>
       <geometry>
-        <mesh filename="package://swd_starter_kit_description/meshes/wheels/starter_kit_right_tire.stl"
-               scale="0.001 0.001 0.001"/>
+        <mesh filename="file:///home/fatma/autonomous_slam_baseline/src/swd_starter_kit_description/meshes/wheels/starter_kit_right_tire.stl"
+              scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="wheel_orange"/>
     </visual>
@@ -141,11 +135,11 @@
     </collision>
 
     <inertial>
-      <origin xyz="0 0 0" />
-      <mass value="1" />
+      <origin xyz="0 0 0"/>
+      <mass value="1"/>
       <inertia ixx="0.00111" ixy="0.0" ixz="0.0"
                iyy="0.00111" iyz="0.0"
-               izz="0.00198" />
+               izz="0.00198"/>
     </inertial>
   </link>
 
@@ -173,11 +167,11 @@
     </collision>
 
     <inertial>
-      <origin xyz="0 0 0" />
-      <mass value="0.005" />
+      <origin xyz="0 0 0"/>
+      <mass value="0.005"/>
       <inertia ixx="0.001" ixy="0.0" ixz="0.0"
                iyy="0.001" iyz="0.0"
-               izz="0.001" />
+               izz="0.001"/>
     </inertial>
   </link>
 
@@ -204,15 +198,15 @@
     </collision>
 
     <inertial>
-      <origin xyz="0 0 0" />
-      <mass value="0.005" />
+      <origin xyz="0 0 0"/>
+      <mass value="0.005"/>
       <inertia ixx="0.001" ixy="0.0" ixz="0.0"
                iyy="0.001" iyz="0.0"
-               izz="0.001" />
+               izz="0.001"/>
     </inertial>
   </link>
 
-  <!-- ========= GAZEBO FRICTION + DIFF DRIVE PLUGIN ========= -->
+  <!-- ========= GAZEBO FRICTION ========= -->
   <gazebo reference="swd_left_link">
     <mu1>0.7</mu1>
     <mu2>0.7</mu2>
@@ -255,39 +249,46 @@
     <material>Gazebo/FlatBlack</material>
   </gazebo>
 
+  <!-- ========= DIFF DRIVE ========= -->
   <gazebo>
-    <plugin name="diff_drive_controller" filename="libgazebo_ros_diff_drive.so">
-      <commandTopic>/swd_diff_drive_controller/cmd_vel</commandTopic>
-      <odometryTopic>/swd_diff_drive_controller/odom</odometryTopic>
-      <odometryFrame>odom</odometryFrame>
-      <odometrySource>world</odometrySource>
-      <publishOdomTF>true</publishOdomTF>
-      <robotBaseFrame>base_link</robotBaseFrame>
-      <publishWheelTF>false</publishWheelTF>
-      <publishTf>true</publishTf>
-      <publishWheelJointState>true</publishWheelJointState>
-      <legacyMode>false</legacyMode>
-      <updateRate>30</updateRate>
-      <leftJoint>base_swd_left_joint</leftJoint>
-      <rightJoint>base_swd_right_joint</rightJoint>
-      <wheelSeparation>0.485</wheelSeparation>
-      <wheelDiameter>0.125</wheelDiameter>
-      <wheelAcceleration>11</wheelAcceleration>
-      <wheelTorque>37</wheelTorque>
-      <rosDebugLevel>na</rosDebugLevel>
+    <plugin name="gazebo_ros_diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <ros>
+        <remapping>cmd_vel:=/cmd_vel</remapping>
+        <remapping>odom:=/odom</remapping>
+      </ros>
+
+      <update_rate>30.0</update_rate>
+
+      <left_joint>base_swd_left_joint</left_joint>
+      <right_joint>base_swd_right_joint</right_joint>
+
+      <wheel_separation>0.485</wheel_separation>
+      <wheel_diameter>0.125</wheel_diameter>
+
+      <max_wheel_torque>37.0</max_wheel_torque>
+      <max_wheel_acceleration>11.0</max_wheel_acceleration>
+
+      <command_topic>/cmd_vel</command_topic>
+      <odometry_topic>/odom</odometry_topic>
+
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>false</publish_wheel_tf>
+
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
     </plugin>
   </gazebo>
 
   <!-- ========= LIDAR ========= -->
   <joint name="base_laser" type="fixed">
-    <origin xyz="0.05 0 0.2" rpy="0 0 0" />
-    <parent link="base_link" />
-    <child link="laser" />
-    <axis xyz="0 0 0" />
+    <origin xyz="0.05 0 0.2" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child link="laser"/>
+    <axis xyz="0 0 0"/>
   </joint>
 
   <link name="laser">
-    <!-- simple two-part visual: black base + yellow top -->
     <visual>
       <origin xyz="0 0 -0.01" rpy="0 0 0"/>
       <geometry>
@@ -312,11 +313,11 @@
     </collision>
 
     <inertial>
-      <mass value="0.1" />
-      <origin xyz="0 0 0" />
+      <mass value="0.1"/>
+      <origin xyz="0 0 0"/>
       <inertia ixx="0.001" ixy="0.0" ixz="0.0"
                iyy="0.001" iyz="0.0"
-               izz="0.001" />
+               izz="0.001"/>
     </inertial>
   </link>
 
@@ -346,14 +347,17 @@
           <stddev>0.01</stddev>
         </noise>
       </ray>
-      <plugin name="laser_controller" filename="libgazebo_ros_laser.so">
-        <topicName>scan</topicName>
-        <frameName>laser</frameName>
+      <plugin name="laser_controller" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <remapping>~/out:=/scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/LaserScan</output_type>
+        <frame_name>laser</frame_name>
       </plugin>
     </sensor>
   </gazebo>
 
-  <!-- ========= CAMERA (BLACK BOX STUB) ========= -->
+  <!-- ========= CAMERA ========= -->
   <joint name="camera_joint" type="fixed">
     <parent link="base_link"/>
     <child link="camera_link"/>
@@ -369,7 +373,6 @@
       <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
     </inertial>
 
-    <!-- replaced missing tbot_sim Kinect mesh with a simple black box -->
     <collision name="kinect_collision">
       <origin xyz="0.03 0 0" rpy="0 0 0"/>
       <geometry>
@@ -387,4 +390,3 @@
   </link>
 
 </robot>
-

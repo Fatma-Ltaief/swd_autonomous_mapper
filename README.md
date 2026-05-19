@@ -252,21 +252,7 @@ This step initializes:
 
 ---
 
-### 11.2 Launch Command
-
-(On the robot)
-
-```bash
-source /opt/ros/humble/setup.bash
-<your_robot_workspace>/install/setup.bash
-ros2 launch <your_bringup_package> <your_bringup_launch>.py
-```
-
-> ⚠️ Replace `<your_bringup_package>` and `<your_bringup_launch>` with your actual package and launch file.
-
----
-
-### 11.3 Expected Topics
+### 11.2 Expected Topics
 
 After bringup, verify:
 
@@ -286,7 +272,7 @@ You should see:
 
 ---
 
-### 11.4 TF Tree
+### 11.3 TF Tree
 
 Verify transforms:
 
@@ -308,7 +294,7 @@ odom → base_link → laser_frame
 
 ---
 
-### 11.5 Quick Validation
+### 11.4 Quick Validation
 
 Check LiDAR:
 
@@ -455,4 +441,108 @@ These are defined in Nav2 config YAML files.
 * TF missing `map → odom`
 
 ---
+## 13. Autonomous Exploration (Frontier-Based)
 
+This section explains how to run the **working autonomous frontier-based exploration baseline** on the real robot.
+
+The current pipeline is:
+
+- robot base already running
+- `slam_toolbox` for online mapping
+- Nav2 for planning and control
+- `nav2_wavefront_frontier_exploration` for automatic frontier selection
+
+The robot will:
+
+- build the map online
+- detect frontiers from unknown map regions
+- send navigation goals automatically
+- continue until no more frontiers remain
+
+---
+Terminal 1: SLAM
+```bash
+export ROS_DOMAIN_ID=40
+source /opt/ros/humble/setup.bash
+source ~/ws-ros2/install/setup.bash
+
+ros2 launch slam_toolbox online_async_launch.py
+```
+This starts online SLAM and publishes:
+* /map
+* /map_updates
+* map -> odom
+
+Terminal 2: Nav2
+```bash
+export ROS_DOMAIN_ID=40
+source /opt/ros/humble/setup.bash
+source ~/ws-ros2/install/setup.bash
+
+ros2 launch swd_nav2 nav2_with_slam.launch.py
+```
+This starts the navigation stack, including:
+
+* planner
+* controller
+* behavior tree navigator
+* local and global costmaps
+* waypoint follower
+Terminal 3: RViz
+```bash
+export ROS_DOMAIN_ID=40
+source /opt/ros/humble/setup.bash
+source ~/ws-ros2/install/setup.bash
+
+rviz2
+```
+Recommended RViz displays:
+
+* Map
+* TF
+* LaserScan
+* Path on /plan
+* Path on /local_plan
+
+Set:
+
+Fixed Frame = map
+Terminal 4: Frontier Exploration
+``` bash
+export ROS_DOMAIN_ID=40
+source /opt/ros/humble/setup.bash
+source ~/ws-ros2/install/setup.bash
+
+ros2 run nav2_wfd explore
+```
+This starts the frontier exploration node.
+
+The node:
+
+* listens to /map
+* gets robot pose from /odom
+* detects frontier regions
+* sends waypoint goals to Nav2
+* repeats until exploration is finished
+
+---
+
+# Gazebo Simulation
+
+Launch the robot in Gazebo:
+
+```bash
+ros2 launch swd_sim gazebo_robot.launch.py
+```
+
+Move the robot:
+
+```bash
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}, angular: {z: 0.5}}" -r 10
+```
+
+Check odometry:
+
+```bash
+ros2 topic echo /odom
+```
