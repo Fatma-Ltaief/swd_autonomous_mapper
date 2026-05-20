@@ -10,4 +10,4 @@ log/
 __pycache__/
 *.pyc
 .vscode/
-.idea/
+.idea/src/swd_sim/models/imt_floor/meshes/floor_tri.dae

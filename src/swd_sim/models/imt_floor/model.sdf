@@ -1,0 +1,74 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="imt_floor">
+
+    <static>true</static>
+
+    <!-- FLOOR -->
+    <link name="floor_link">
+
+      <visual name="floor_visual">
+        <geometry>
+          <mesh>
+            <uri>model://imt_floor/meshes/floor.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+
+      <!--
+        Detailed imported meshes are kept for visuals only. Gazebo physics is
+        much more stable when collisions use simple geometry.
+      -->
+      <collision name="floor_collision">
+        <geometry>
+          <plane>
+            <normal>0 0 1</normal>
+            <size>50 50</size>
+          </plane>
+        </geometry>
+      </collision>
+
+    </link>
+
+    <!-- WALLS -->
+    <link name="walls_link">
+
+      <visual name="walls_visual">
+        <geometry>
+          <mesh>
+            <uri>model://imt_floor/meshes/walls.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+
+      <!--
+        Visual meshes are intentionally separate from collision geometry.
+        Detailed DAE wall meshes can create unstable contacts in Gazebo, so
+        simplified collision boxes are added incrementally for stable physics.
+
+        These first collision-only boxes approximate the main corridor walls
+        near the robot spawn area. They have no matching <visual> elements, so
+        they are invisible in Gazebo.
+      -->
+      <collision name="main_corridor_left_wall_collision">
+        <pose>2.0 0.75 1.5 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>14.0 0.20 3.0</size>
+          </box>
+        </geometry>
+      </collision>
+
+      <collision name="main_corridor_right_wall_collision">
+        <pose>3.0 -2.50 1.5 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>23.5 0.20 3.0</size>
+          </box>
+        </geometry>
+      </collision>
+
+    </link>
+
+  </model>
+</sdf>
