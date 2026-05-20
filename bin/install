@@ -1,0 +1,14 @@
+#!/bin/bash
+git clone https://github.com/Fatma-Ltaief/swd_autonomous_mapper.git
+cd swd_autonomous_mapper 
+
+sudo apt update
+sudo apt install -y \
+  ros-$ROS_DISTRO-slam-toolbox \
+  ros-$ROS_DISTRO-navigation2 \
+  ros-$ROS_DISTRO-nav2-bringup \
+  ros-$ROS_DISTRO-tf2-tools \
+  ros-$ROS_DISTRO-rviz2
+
+source /opt/ros/$ROS_DISTRO/setup.bash
+colcon build

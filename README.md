@@ -1,8 +1,6 @@
 # Autonomous SLAM Baseline (ROS 2 Humble)
 
-## 1. Overview
-
-This repository provides a **clean baseline for single-robot autonomous SLAM** using:
+This repository provides a **clean baseline for robot autonomous SLAM** using:
 
 * ROS 2 Humble
 * `slam_toolbox` for 2D SLAM
@@ -14,6 +12,36 @@ This setup has been validated on a **real robot platform** and serves as the sta
 * Autonomous exploration
 * Frontier-based SLAM
 * Future RF-aware exploration extensions
+
+## 1. Install
+
+Clone this repository, make sure the main dependencies are installed, then use colcon to build all our packages...
+
+```sh
+export ROS_DISTRO=humble
+
+git clone https://github.com/Fatma-Ltaief/swd_autonomous_mapper.git
+cd swd_autonomous_mapper 
+
+sudo apt update
+sudo apt install -y \
+  ros-$ROS_DISTRO-slam-toolbox \
+  ros-$ROS_DISTRO-navigation2 \
+  ros-$ROS_DISTRO-nav2-bringup \
+  ros-$ROS_DISTRO-tf2-tools \
+  ros-$ROS_DISTRO-rviz2
+
+source /opt/ros/$ROS_DISTRO/setup.bash
+colcon build
+source ./install/setup.bash
+```
+
+Or with your favorite _ROS2_ already installed: 
+
+
+```sh
+curl https://raw.githubusercontent.com/Fatma-Ltaief/swd_autonomous_mapper/refs/heads/main/bin/install
+```
 
 ---
 
