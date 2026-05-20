@@ -36,11 +36,12 @@ colcon build
 source ./install/setup.bash
 ```
 
-Or with your favorite _ROS2_ already installed: 
-
+Or with your favorite _ROS2_ already installed (test: `env | grep ROS_DISTRO`): 
 
 ```sh
-curl https://raw.githubusercontent.com/Fatma-Ltaief/swd_autonomous_mapper/refs/heads/main/bin/install
+curl -sSL https://raw.githubusercontent.com/Fatma-Ltaief/swd_autonomous_mapper/refs/heads/main/bin/install | bash
+cd swd_autonomous_mapper 
+source ./install/setup.bash
 ```
 
 ---
