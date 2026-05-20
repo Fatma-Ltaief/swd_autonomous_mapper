@@ -217,30 +217,6 @@ Fixed Frame = map
 
 ---
 
-## 7. Current Limitations
-
-* The `wander_avoid` node is **purely reactive**
-* It:
-
-  * Avoids walls well
-  * Struggles with clutter (chairs, desks)
-* No global planning
-* No optimal coverage strategy
-* No guarantee of full exploration
-
----
-
-## 8. Next Steps
-
-Planned evolution of this baseline:
-
-1. Integrate **Nav2 navigation stack**
-2. Validate **manual goal navigation**
-3. Add **frontier-based exploration**
-4. Benchmark exploration performance
-5. Extend toward **RF-aware exploration**
-
----
 
 ## 9. Notes
 
@@ -256,19 +232,6 @@ Planned evolution of this baseline:
   * Confirm `/scan` is publishing
 
 ---
-
-## 10. Repository Purpose
-
-This repository serves as:
-
-* A **reproducible baseline**
-* A **stable starting point for research**
-* A **reference configuration** before adding complexity
-
----
-## 11. Robot Bringup
-
-The robot bringup is responsible for launching all **hardware-related nodes** required for operation.
 
 ### 11.1 Purpose
 
