@@ -8,8 +8,15 @@
   <license>TODO: License declaration</license>
 
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_wfd</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>swd_nav2</exec_depend>
+  <exec_depend>swd_starter_kit_description</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

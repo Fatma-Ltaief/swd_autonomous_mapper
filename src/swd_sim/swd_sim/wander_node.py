@@ -14,10 +14,12 @@ class WanderNode(Node):
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         self.declare_parameter('front_obstacle_distance', 0.45)
         self.declare_parameter('forward_speed', 0.08)
-        self.declare_parameter('turn_speed', 0.45)
-        self.declare_parameter('front_sector_degrees', 15.0)
-        self.declare_parameter('centering_gain', 0.25)
-        self.declare_parameter('max_centering_turn', 0.18)
+        self.declare_parameter('reverse_speed', -0.04)
+        self.declare_parameter('angular_speed', 0.35)
+        self.declare_parameter('steering_gain', 0.20)
+        self.declare_parameter('max_steering_speed', 0.15)
+        self.declare_parameter('stuck_turn_time', 5.0)
+        self.declare_parameter('reverse_time', 1.0)
 
         scan_topic = self.get_parameter('scan_topic').value
         cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
@@ -25,16 +27,21 @@ class WanderNode(Node):
         self.front_obstacle_distance = float(
             self.get_parameter('front_obstacle_distance').value)
         self.forward_speed = float(self.get_parameter('forward_speed').value)
-        self.turn_speed = float(self.get_parameter('turn_speed').value)
-        self.front_sector = math.radians(
-            float(self.get_parameter('front_sector_degrees').value))
-        self.centering_gain = float(self.get_parameter('centering_gain').value)
-        self.max_centering_turn = float(
-            self.get_parameter('max_centering_turn').value)
+        self.reverse_speed = float(self.get_parameter('reverse_speed').value)
+        self.angular_speed = float(self.get_parameter('angular_speed').value)
+        self.steering_gain = float(self.get_parameter('steering_gain').value)
+        self.max_steering_speed = float(
+            self.get_parameter('max_steering_speed').value)
+        self.stuck_turn_time = float(self.get_parameter('stuck_turn_time').value)
+        self.reverse_time = float(self.get_parameter('reverse_time').value)
 
         self.latest_scan = None
         self.last_log_time = self.get_clock().now()
         self.state = 'waiting_for_scan'
+        self.turn_started_at = None
+        self.turn_direction = 1.0
+        self.reverse_started_at = None
+        self.recovery_turn_direction = -1.0
 
         self.scan_sub = self.create_subscription(
             LaserScan,
@@ -58,25 +65,77 @@ class WanderNode(Node):
             return
 
         now = self.get_clock().now()
-        front_min = self.min_range_in_sector(
-            self.latest_scan, -self.front_sector, self.front_sector)
-        left_min = self.min_range_in_sector(
-            self.latest_scan, math.radians(60.0), math.radians(120.0))
-        right_min = self.min_range_in_sector(
-            self.latest_scan, math.radians(-120.0), math.radians(-60.0))
+        sectors = self.scan_sectors(self.latest_scan)
+        front_min = sectors['front']
+        left_min = sectors['left']
+        right_min = sectors['right']
 
-        if front_min < self.front_obstacle_distance:
-            turn_direction = self.choose_turn_direction(left_min, right_min)
+        if self.state == 'reversing':
+            if (
+                self.seconds_since(now, self.reverse_started_at)
+                < self.reverse_time
+            ):
+                self.publish_reverse()
+                self.log_status(now, front_min, left_min, right_min, 'reverse')
+                return
+
+            self.turn_started_at = now
+            self.turn_direction = self.recovery_turn_direction
+            self.reverse_started_at = None
             self.set_state('turning')
-            action = 'turn_left' if turn_direction > 0.0 else 'turn_right'
-            self.publish_turn(turn_direction)
+            action = 'turn_left' if self.turn_direction > 0.0 else 'turn_right'
+            self.publish_turn(self.turn_direction)
             self.log_status(now, front_min, left_min, right_min, action)
             return
 
+        if front_min < self.front_obstacle_distance:
+            if self.state != 'turning':
+                self.turn_direction = self.choose_turn_direction(
+                    sectors['front_left'],
+                    sectors['front_right'],
+                    left_min,
+                    right_min,
+                )
+                self.turn_started_at = now
+
+            elif (
+                self.seconds_since(now, self.turn_started_at)
+                > self.stuck_turn_time
+            ):
+                self.recovery_turn_direction = -self.turn_direction
+                self.reverse_started_at = now
+                self.turn_started_at = None
+                self.set_state('reversing')
+                self.publish_reverse()
+                self.log_status(now, front_min, left_min, right_min, 'reverse')
+                return
+
+            self.set_state('turning')
+            action = 'turn_left' if self.turn_direction > 0.0 else 'turn_right'
+            self.publish_turn(self.turn_direction)
+            self.log_status(now, front_min, left_min, right_min, action)
+            return
+
+        self.turn_started_at = None
+        self.reverse_started_at = None
         self.set_state('moving')
-        angular_z, action = self.centering_turn(left_min, right_min)
+        angular_z, action = self.steering_correction(left_min, right_min)
         self.publish_forward(angular_z)
         self.log_status(now, front_min, left_min, right_min, action)
+
+    def scan_sectors(self, scan):
+        return {
+            'front': self.min_range_in_sector(
+                scan, math.radians(-20.0), math.radians(20.0)),
+            'front_left': self.min_range_in_sector(
+                scan, math.radians(20.0), math.radians(70.0)),
+            'front_right': self.min_range_in_sector(
+                scan, math.radians(-70.0), math.radians(-20.0)),
+            'left': self.min_range_in_sector(
+                scan, math.radians(70.0), math.radians(120.0)),
+            'right': self.min_range_in_sector(
+                scan, math.radians(-120.0), math.radians(-70.0)),
+        }
 
     def min_range_in_sector(self, scan, min_angle, max_angle):
         best = math.inf
@@ -87,30 +146,44 @@ class WanderNode(Node):
             if distance < scan.range_min or distance > scan.range_max:
                 continue
 
-            angle = scan.angle_min + index * scan.angle_increment
+            angle = self.normalize_angle(
+                scan.angle_min + index * scan.angle_increment)
             if min_angle <= angle <= max_angle:
                 best = min(best, distance)
 
         return best
 
-    def choose_turn_direction(self, left_min, right_min):
-        if math.isfinite(left_min) and math.isfinite(right_min):
-            return 1.0 if left_min >= right_min else -1.0
-        if math.isfinite(left_min):
+    def normalize_angle(self, angle):
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    def choose_turn_direction(self, front_left_min, front_right_min, left_min,
+                              right_min):
+        left_space = self.closest_valid(front_left_min, left_min)
+        right_space = self.closest_valid(front_right_min, right_min)
+
+        if math.isfinite(left_space) and math.isfinite(right_space):
+            return 1.0 if left_space >= right_space else -1.0
+        if math.isfinite(left_space):
             return 1.0
-        if math.isfinite(right_min):
+        if math.isfinite(right_space):
             return -1.0
         return 1.0
 
-    def centering_turn(self, left_min, right_min):
+    def closest_valid(self, *distances):
+        valid = [distance for distance in distances if math.isfinite(distance)]
+        if not valid:
+            return math.inf
+        return min(valid)
+
+    def steering_correction(self, left_min, right_min):
         if not math.isfinite(left_min) or not math.isfinite(right_min):
             return 0.0, 'forward'
 
         clearance_error = left_min - right_min
-        angular_z = self.centering_gain * clearance_error
+        angular_z = self.steering_gain * clearance_error
         angular_z = max(
-            -self.max_centering_turn,
-            min(self.max_centering_turn, angular_z)
+            -self.max_steering_speed,
+            min(self.max_steering_speed, angular_z)
         )
 
         if abs(angular_z) < 0.03:
@@ -128,17 +201,27 @@ class WanderNode(Node):
     def publish_turn(self, turn_direction):
         twist = Twist()
         twist.linear.x = 0.0
-        twist.angular.z = turn_direction * self.turn_speed
+        twist.angular.z = turn_direction * self.angular_speed
+        self.cmd_pub.publish(twist)
+
+    def publish_reverse(self):
+        twist = Twist()
+        twist.linear.x = self.reverse_speed
+        twist.angular.z = 0.0
         self.cmd_pub.publish(twist)
 
     def publish_stop(self):
         self.cmd_pub.publish(Twist())
 
+    def seconds_since(self, now, start_time):
+        if start_time is None:
+            return 0.0
+        return (now - start_time).nanoseconds / 1_000_000_000.0
+
     def set_state(self, state):
         if state == self.state:
             return
         self.state = state
-        self.get_logger().info(f'Wander state: {state}')
 
     def log_status(self, now, front_min, left_min, right_min, action):
         if (now - self.last_log_time).nanoseconds < 1_000_000_000:

@@ -217,6 +217,41 @@ Fixed Frame = map
 
 ---
 
+## 7. Prototype: SLAM Map to Sionna RT Scene
+
+This repository includes a first prototype for converting a saved ROS 2 SLAM
+occupancy map into a simplified 2.5D scene for Sionna RT experiments:
+
+```bash
+python3 scripts/slam_map_to_sionna_scene.py \
+  --map_yaml warehouse_slam_map.yaml \
+  --output_dir output_scene \
+  --wall_height 2.5 \
+  --wall_thickness 0.10 \
+  --floor_thickness 0.05
+```
+
+Pipeline:
+
+1. SLAM map: read the ROS map YAML and PGM image, including `resolution`,
+   `origin`, `occupied_thresh`, and `free_thresh`.
+2. Wall extraction: classify occupied cells, clean the wall mask with OpenCV
+   morphology, extract contours, and simplify them with `approxPolyDP`.
+3. 2.5D extrusion: convert map pixels into world coordinates and extrude each
+   wall contour vertically into a simple OBJ mesh.
+4. Sionna scene: export `walls.obj`, `floor.obj`, a debug `wall_mask_debug.png`,
+   and a basic `scene.xml` that references the meshes.
+
+This is intentionally a prototype, not a production converter. It does not use
+Blender and it does not infer doors, materials, furniture, ceiling geometry, or
+multi-floor structure from the 2D map.
+
+Python dependencies:
+
+```bash
+pip install pyyaml numpy opencv-python
+```
+
 
 ## 9. Notes
 
