@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="ppi_office">
+    <static>true</static>
+
+    <link name="ppi_office_link">
+      <visual name="floor_visual">
+        <pose>-94.339852 9.401968 0 1.5708 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>file:///home/fatma/autonomous_slam_baseline/src/swd_sim/models/ppi_office/meshes/floor2.STL</uri>
+            <!-- STL coordinates are in millimeters and Y-up. Scale converts to meters; pose centers X/Z and rotates Y-up to Gazebo Z-up. -->
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </visual>
+
+      <collision name="floor_collision">
+        <pose>-94.339852 9.401968 0 1.5708 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>file:///home/fatma/autonomous_slam_baseline/src/swd_sim/models/ppi_office/meshes/floor2.STL</uri>
+            <!-- Keep collision transform identical to visual transform. -->
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </collision>
+
+      <visual name="walls_visual">
+        <pose>-94.339852 9.401968 0 1.5708 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>file:///home/fatma/autonomous_slam_baseline/src/swd_sim/models/ppi_office/meshes/walls2.STL</uri>
+            <!-- STL coordinates are in millimeters and Y-up. Scale converts to meters; pose centers X/Z and rotates Y-up to Gazebo Z-up. -->
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </visual>
+
+      <collision name="walls_collision">
+        <pose>-94.339852 9.401968 0 1.5708 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>file:///home/fatma/autonomous_slam_baseline/src/swd_sim/models/ppi_office/meshes/walls2.STL</uri>
+            <!-- Keep collision transform identical to visual transform. -->
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

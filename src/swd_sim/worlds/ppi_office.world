@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <world name="ppi_office_world">
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <!-- The STL environment already includes a floor mesh, so no ground_plane is included here. -->
+    <include>
+      <uri>file:///home/fatma/autonomous_slam_baseline/src/swd_sim/models/ppi_office</uri>
+    </include>
+  </world>
+</sdf>
