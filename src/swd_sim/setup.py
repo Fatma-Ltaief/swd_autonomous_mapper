@@ -29,7 +29,7 @@ setup(
          glob('config/*')),
         (os.path.join('share', package_name, 'worlds'),
          glob('worlds/*')),
-    ] + package_files('models'),
+    ] + package_files('models') + package_files('PPI'),
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='fatma',

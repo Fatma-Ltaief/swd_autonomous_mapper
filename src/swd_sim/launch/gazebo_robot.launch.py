@@ -15,6 +15,9 @@ def generate_launch_description():
     x_pose = LaunchConfiguration('x_pose')
     y_pose = LaunchConfiguration('y_pose')
     z_pose = LaunchConfiguration('z_pose')
+    roll = LaunchConfiguration('roll')
+    pitch = LaunchConfiguration('pitch')
+    yaw = LaunchConfiguration('yaw')
     world = LaunchConfiguration('world')
 
     # Prefer the description package installed beside this swd_sim package.
@@ -82,6 +85,9 @@ def generate_launch_description():
             '-x', x_pose,
             '-y', y_pose,
             '-z', z_pose,
+            '-R', roll,
+            '-P', pitch,
+            '-Y', yaw,
         ]
     )
 
@@ -105,6 +111,21 @@ def generate_launch_description():
             'z_pose',
             default_value='0.05',
             description='Initial robot z position'
+        ),
+        DeclareLaunchArgument(
+            'roll',
+            default_value='0.0',
+            description='Initial robot roll'
+        ),
+        DeclareLaunchArgument(
+            'pitch',
+            default_value='0.0',
+            description='Initial robot pitch'
+        ),
+        DeclareLaunchArgument(
+            'yaw',
+            default_value='0.0',
+            description='Initial robot yaw'
         ),
         DeclareLaunchArgument(
             'world',

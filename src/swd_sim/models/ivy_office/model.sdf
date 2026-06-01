@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="ivy_office">
+    <static>true</static>
+
+    <link name="ivy_office_link">
+      <visual name="ivy_office_visual">
+        <pose>0 0 0 1.5708 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://ivy_office/meshes/Ivy_Office_03.obj</uri>
+            <scale>0.01 0.01 0.01</scale>
+          </mesh>
+        </geometry>
+      </visual>
+
+      <collision name="ivy_office_collision">
+        <pose>0 0 0 1.5708 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://ivy_office/meshes/Ivy_Office_03.obj</uri>
+            <scale>0.01 0.01 0.01</scale>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>
