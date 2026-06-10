@@ -8,15 +8,16 @@ from launch_ros.actions import Node
 
 
 # PPI office initial robot pose. These match the tuned PPI frontier launch.
-SPAWN_X = '4.0'
-SPAWN_Y = '-3.0'
-SPAWN_Z = '0.3'
+SPAWN_X = '7.839656829833984'
+SPAWN_Y = '-2.6261680126190186'
+SPAWN_Z = '0.23'
 SPAWN_ROLL = '0.0'
 SPAWN_PITCH = '0.0'
 SPAWN_YAW = '0'#3.14159
 
 
 def generate_launch_description():
+    use_sim_time = True
     swd_sim_share = Path(get_package_share_directory('swd_sim'))
     swd_nav2_share = Path(get_package_share_directory('swd_nav2'))
     ralc_share = Path(get_package_share_directory('ralc_region_exploration'))
@@ -61,11 +62,28 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(str(slam_launch)),
     )
 
+    scan_min_range_filter = Node(
+        package='ralc_region_exploration',
+        executable='scan_min_range_filter_node',
+        name='scan_min_range_filter',
+        output='screen',
+        emulate_tty=True,
+        respawn=True,
+        respawn_delay=2.0,
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'input_scan_topic': '/scan',
+            'output_scan_topic': '/scan_filtered',
+            'min_valid_range': 0.25,
+        }],
+    )
+
     nav2_nodes = [
         LogInfo(msg=[
             'Stage 3/4: Nav2 starting for R-ALC with lifecycle nodes: ',
             ', '.join(nav2_lifecycle_nodes),
         ]),
+        LogInfo(msg=['Nav2 params file: ', str(nav2_params)]),
         Node(
             package='nav2_controller',
             executable='controller_server',
@@ -137,10 +155,13 @@ def generate_launch_description():
 
     return LaunchDescription([
         LogInfo(msg=[
-            'PPI R-ALC launch order: Gazebo -> robot -> SLAM -> Nav2 -> R-ALC',
+            'PPI R-ALC launch order: Gazebo -> robot -> scan filter -> '
+            'SLAM -> Nav2 -> R-ALC',
         ]),
         LogInfo(msg='Stage 1/4: Gazebo + robot starting for PPI office'),
         robot_simulation,
+        LogInfo(msg='Stage 1b/4: /scan -> /scan_filtered filter starting'),
+        scan_min_range_filter,
         TimerAction(period=5.0, actions=[
             LogInfo(msg='Stage 2/4: SLAM starting'),
             slam_toolbox,

@@ -38,6 +38,10 @@ setup(
             'ralc_region_exploration.ralc_pgs_planner_node:main',
             'ralc_exploration_manager_node = '
             'ralc_region_exploration.ralc_exploration_manager_node:main',
+            'ralc_slam_backend_node = '
+            'ralc_region_exploration.ralc_slam_backend_node:main',
+            'scan_min_range_filter_node = '
+            'ralc_region_exploration.scan_min_range_filter_node:main',
         ],
     },
 )
