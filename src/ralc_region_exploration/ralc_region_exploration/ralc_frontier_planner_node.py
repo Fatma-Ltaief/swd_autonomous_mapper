@@ -49,6 +49,16 @@ class RalcFrontierPlanner(Node):
         self.declare_parameter('failed_goal_blacklist_seconds', 30.0)
         self.declare_parameter('failed_goal_aliasing_distance', 0.5)
         self.declare_parameter('max_failed_goals_per_region', 5)
+        self.declare_parameter('min_observation_travel_distance', 0.20)
+        self.declare_parameter('min_frontier_reduction_ratio', 0.10)
+        self.declare_parameter('ineffective_goal_blacklist_seconds', 15.0)
+        self.declare_parameter('ineffective_goal_aliasing_distance', 0.5)
+        self.declare_parameter('max_ineffective_observation_attempts_per_cluster', 2)
+        self.declare_parameter('min_visible_unknown_gain', 5)
+        self.declare_parameter('reject_observation_pose_no_visible_unknown', False)
+        self.declare_parameter('deferred_frontier_recheck_distance', 1.0)
+        self.declare_parameter('deferred_frontier_timeout_sec', 20.0)
+        self.declare_parameter('max_deferred_frontiers_before_region_growth', 3)
         self.declare_parameter('beta_A', 0.5)
         self.declare_parameter('beta_S', 0.5)
         self.declare_parameter('beta_G', 0.02)
@@ -59,6 +69,7 @@ class RalcFrontierPlanner(Node):
         self.declare_parameter('min_goal_distance_from_robot', 0.35)
         self.declare_parameter('occupied_safety_margin', 0.10)
         self.declare_parameter('unknown_safety_margin', 0.10)
+        self.declare_parameter('enable_recovery_frontier_without_astar', False)
         self.declare_parameter('region_unknown_completion_threshold', 0.03)
         self.declare_parameter('region_reachable_unknown_completion_threshold', 0.03)
         self.declare_parameter('robot_coverage_radius', 0.75)
@@ -86,6 +97,38 @@ class RalcFrontierPlanner(Node):
         self.max_failed_goals_per_region = int(
             self.get_parameter('max_failed_goals_per_region').value
         )
+        self.min_observation_travel_distance = float(
+            self.get_parameter('min_observation_travel_distance').value
+        )
+        self.min_frontier_reduction_ratio = float(
+            self.get_parameter('min_frontier_reduction_ratio').value
+        )
+        self.ineffective_goal_blacklist_seconds = float(
+            self.get_parameter('ineffective_goal_blacklist_seconds').value
+        )
+        self.ineffective_goal_aliasing_distance = float(
+            self.get_parameter('ineffective_goal_aliasing_distance').value
+        )
+        self.max_ineffective_observation_attempts_per_cluster = int(
+            self.get_parameter(
+                'max_ineffective_observation_attempts_per_cluster'
+            ).value
+        )
+        self.min_visible_unknown_gain = int(
+            self.get_parameter('min_visible_unknown_gain').value
+        )
+        self.reject_observation_pose_no_visible_unknown = bool(
+            self.get_parameter('reject_observation_pose_no_visible_unknown').value
+        )
+        self.deferred_frontier_recheck_distance = float(
+            self.get_parameter('deferred_frontier_recheck_distance').value
+        )
+        self.deferred_frontier_timeout_sec = float(
+            self.get_parameter('deferred_frontier_timeout_sec').value
+        )
+        self.max_deferred_frontiers_before_region_growth = int(
+            self.get_parameter('max_deferred_frontiers_before_region_growth').value
+        )
         self.beta_a = float(self.get_parameter('beta_A').value)
         self.beta_s = float(self.get_parameter('beta_S').value)
         self.beta_g = float(self.get_parameter('beta_G').value)
@@ -110,6 +153,9 @@ class RalcFrontierPlanner(Node):
         )
         self.unknown_safety_margin = float(
             self.get_parameter('unknown_safety_margin').value
+        )
+        self.enable_recovery_frontier_without_astar = bool(
+            self.get_parameter('enable_recovery_frontier_without_astar').value
         )
         self.region_unknown_completion_threshold = float(
             self.get_parameter('region_unknown_completion_threshold').value
@@ -138,7 +184,15 @@ class RalcFrontierPlanner(Node):
         self.last_non_actionable_clusters: List[FrontierCluster] = []
         self.last_clusters: List[FrontierCluster] = []
         self.failed_goal_blacklist = {}
+        self.ineffective_observation_attempts = {}
+        self.pending_observation_goal = None
+        self.pending_observation_execution = None
+        self.last_observation_report = None
         self.rejected_goal_candidates = []
+        self.valid_visible_goal_candidates = []
+        self.deferred_frontier_clusters = {}
+        self.last_deferred_clusters: List[FrontierCluster] = []
+        self.last_deferred_recheck_robot_pose = None
         self.robot_trajectory_points: List[Tuple[float, float]] = []
         self.previous_cluster_snapshots = {}
         self.region_mask_cache = {}
@@ -173,6 +227,12 @@ class RalcFrontierPlanner(Node):
             String,
             '/ralc/frontier_goal_failed',
             self.frontier_goal_failed_callback,
+            10,
+        )
+        self.create_subscription(
+            String,
+            '/ralc/execution_result',
+            self.execution_result_callback,
             10,
         )
 
@@ -220,7 +280,14 @@ class RalcFrontierPlanner(Node):
         previous_region = self.current_region
         self.current_region = region if region else None
         self.update_cached_region_status(previous_region, self.current_region)
+        if self.region_id(previous_region) != self.region_id(self.current_region):
+            self.deferred_frontier_clusters.clear()
         self.last_planned_map_update_count = -1
+
+    def region_id(self, region):
+        if not region:
+            return None
+        return int(region.get('region_id', 0) or 0)
 
     def update_cached_region_status(self, previous_region, current_region):
         if previous_region is None:
@@ -281,15 +348,24 @@ class RalcFrontierPlanner(Node):
             )
             centroid = failed_point
 
+        failure_type = data.get('failure_type', 'NAV2_FAILED')
+        blacklist_seconds = self.failed_goal_blacklist_seconds
+        aliasing_distance = self.failed_goal_aliasing_distance
+        if failure_type == 'INEFFECTIVE_OBSERVATION_GOAL':
+            blacklist_seconds = self.ineffective_goal_blacklist_seconds
+            aliasing_distance = self.ineffective_goal_aliasing_distance
+
         self.failed_goal_blacklist[cluster_key] = {
             'region_id': int(region_id),
             'centroid_x': float(centroid[0]),
             'centroid_y': float(centroid[1]),
             'failed_goal_x': failed_point[0],
             'failed_goal_y': failed_point[1],
-            'failure_type': data.get('failure_type', 'NAV2_FAILED'),
+            'failure_type': failure_type,
             'message': data.get('message', ''),
             'timestamp': self.now_sec(),
+            'blacklist_seconds': blacklist_seconds,
+            'aliasing_distance': aliasing_distance,
         }
         self.last_planned_map_update_count = -1
         distance_text = 'unknown' if distance is None else f'{distance:.2f}m'
@@ -297,8 +373,29 @@ class RalcFrontierPlanner(Node):
             '[RALC] Blacklisted failed frontier goal for current region: '
             f'region={region_id}, failed_goal=({failed_point[0]:.2f},'
             f'{failed_point[1]:.2f}), nearest_cluster_distance={distance_text}, '
-            f'failure={data.get("failure_type", "NAV2_FAILED")}'
+            f'failure={failure_type}, duration={blacklist_seconds:.1f}s'
         )
+
+    def execution_result_callback(self, msg: String):
+        if self.pending_observation_goal is None:
+            return
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        if data.get('source') != 'pose':
+            return
+        goal_x = data.get('goal_x', data.get('failed_goal_x'))
+        goal_y = data.get('goal_y', data.get('failed_goal_y'))
+        if goal_x is None or goal_y is None:
+            return
+        pending_goal = self.pending_observation_goal.get('goal_world')
+        if pending_goal is None:
+            return
+        if math.hypot(float(goal_x) - pending_goal[0], float(goal_y) - pending_goal[1]) > 0.25:
+            return
+        if data.get('success', False):
+            self.pending_observation_execution = data
 
     def lookup_robot_pose(self) -> Optional[Tuple[float, float, float]]:
         for source_frame in (self.base_frame, self.fallback_base_frame):
@@ -325,13 +422,18 @@ class RalcFrontierPlanner(Node):
             return
         if self.current_region.get('status') != 'ACTIVE':
             return
-        if self.map_update_count == self.last_planned_map_update_count:
-            return
 
         grid = self.latest_map
         robot_pose = self.lookup_robot_pose()
         if robot_pose is None:
             return
+        if (
+            self.map_update_count == self.last_planned_map_update_count and
+            not self.should_recheck_deferred_frontiers(robot_pose)
+        ):
+            return
+        if self.deferred_frontier_clusters:
+            self.last_deferred_recheck_robot_pose = robot_pose[:2]
 
         cycle_start = time.monotonic()
         self.update_robot_coverage(robot_pose)
@@ -358,16 +460,25 @@ class RalcFrontierPlanner(Node):
             'too_small': 0,
             'non_actionable': 0,
             'blacklisted': 0,
+            'ineffective_observation': 0,
+            'deferred_visibility': 0,
+            'observation_pose_no_visible_unknown': 0,
             'costmap': 0,
             'unknown': 0,
         }
+        observation_report = self.evaluate_pending_observation(
+            clusters,
+            int(region_mask.sum()),
+        )
         self.last_non_actionable_clusters = []
+        self.last_deferred_clusters = []
         self.rejected_goal_candidates = []
+        self.valid_visible_goal_candidates = []
         choose_start = time.monotonic()
         scores = self.score_frontiers(clusters, robot_pose, grid, rejection_stats)
         best = min(scores, key=lambda score: score.total_cost, default=None)
         recovery_score = None
-        if best is None and clusters:
+        if best is None and clusters and self.enable_recovery_frontier_without_astar:
             recovery_score = self.recovery_frontier_score(
                 clusters,
                 robot_pose,
@@ -420,6 +531,7 @@ class RalcFrontierPlanner(Node):
                     occupancy_stats,
                     actionable_clusters,
                     non_actionable_clusters,
+                    observation_report=observation_report,
                 )
             else:
                 self.publish_frontier_status(
@@ -430,6 +542,7 @@ class RalcFrontierPlanner(Node):
                     occupancy_stats,
                     actionable_clusters,
                     non_actionable_clusters,
+                    observation_report=observation_report,
                 )
             self.last_planned_map_update_count = self.map_update_count
             return
@@ -442,14 +555,45 @@ class RalcFrontierPlanner(Node):
             occupancy_stats,
             len(scores) + (1 if recovery_score is not None else 0),
             self.non_actionable_cluster_count(clusters, rejection_stats),
+            selected_score=best,
+            observation_report=observation_report,
         )
         goal = self.make_goal_msg(
             grid,
             best.cluster.goal_world,
-            best.cluster.centroid_world,
+            getattr(
+                best.cluster,
+                'observation_target_world',
+                best.cluster.centroid_world,
+            ),
         )
         self.goal_pub.publish(goal)
         self.previous_selected_frontier = best.cluster.goal_world
+        self.pending_observation_goal = {
+            'region_id': int(self.current_region.get('region_id')),
+            'selected_cluster_id': int(best.cluster.cluster_id),
+            'selected_goal_x': float(goal.pose.position.x),
+            'selected_goal_y': float(goal.pose.position.y),
+            'selected_centroid_x': float(best.cluster.centroid_world[0]),
+            'selected_centroid_y': float(best.cluster.centroid_world[1]),
+            'selected_observation_target_x': float(getattr(
+                best.cluster,
+                'observation_target_world',
+                best.cluster.centroid_world,
+            )[0]),
+            'selected_observation_target_y': float(getattr(
+                best.cluster,
+                'observation_target_world',
+                best.cluster.centroid_world,
+            )[1]),
+            'goal_world': (float(goal.pose.position.x), float(goal.pose.position.y)),
+            'centroid_world': best.cluster.centroid_world,
+            'previous_frontier_cells_in_region': int(region_mask.sum()),
+            'previous_clusters': len(clusters),
+            'map_update_count_before': self.map_update_count,
+            'timestamp': self.now_sec(),
+        }
+        self.pending_observation_execution = None
         mode = 'RECOVERY_FRONTIER_GOAL' if best is recovery_score else 'FRONTIER_GOAL'
         self.get_logger().info(
             f'[RALC] {mode} selected: '
@@ -768,9 +912,6 @@ class RalcFrontierPlanner(Node):
     def score_frontiers(self, clusters, robot_pose, grid, rejection_stats):
         scores = []
         for cluster in clusters:
-            if self.cluster_is_failed_goal_blacklisted(cluster):
-                rejection_stats['blacklisted'] += 1
-                continue
             if self.cluster_is_non_actionable(cluster):
                 rejection_reason = self.non_actionable_cluster_reasons.get(
                     self.cluster_identity(cluster),
@@ -795,9 +936,18 @@ class RalcFrontierPlanner(Node):
             )
             if best_candidate is None:
                 continue
+            if best_candidate.get('deferred'):
+                rejection_stats['deferred_visibility'] += 1
+                self.remember_deferred_cluster(cluster)
+                continue
+            self.deferred_frontier_clusters.pop(self.cluster_identity(cluster), None)
             goal_world = best_candidate['goal']
             path_cost = best_candidate['path_cost']
             cluster.goal_world = goal_world
+            cluster.observation_target_world = best_candidate.get(
+                'observation_target',
+                cluster.centroid_world,
+            )
             if path_cost is None:
                 rejection_stats['unreachable'] += 1
                 self.record_cluster_rejection(cluster, 'unreachable')
@@ -827,7 +977,8 @@ class RalcFrontierPlanner(Node):
                 0.40 * best_candidate['clearance'] +
                 self.beta_a * angular_penalty +
                 self.beta_s * switch_cost -
-                self.beta_g * information_gain
+                self.beta_g * information_gain -
+                0.01 * float(best_candidate.get('visible_unknown_gain', 0))
             )
             scores.append(FrontierScore(
                 cluster=cluster,
@@ -840,16 +991,14 @@ class RalcFrontierPlanner(Node):
         return scores
 
     def recovery_frontier_score(self, clusters, robot_pose, grid, rejection_stats):
-        """Pick a safe reachable-ish frontier candidate when A* is over-strict.
+        """Pick a secondary frontier candidate only when A* still proves reachability.
 
-        This prevents the system from freezing in FRONTIERS_UNREACHABLE while
-        frontiers are visibly inside the active region. It remains a frontier
-        goal, not a region-completion signal.
+        The recovery pass may use broader candidate shifts, but it must not bypass
+        path validation. Unreachable goals are left for region growth/transition.
         """
         candidates = []
         for cluster in clusters:
             if (
-                self.cluster_is_failed_goal_blacklisted(cluster) or
                 self.cluster_is_non_actionable(cluster) or
                 cluster.area_cells < self.min_actionable_frontier_cluster_size_cells
             ):
@@ -860,14 +1009,22 @@ class RalcFrontierPlanner(Node):
                 grid,
                 rejection_stats,
                 (0.80, 1.10, 1.40, 1.80),
-                require_astar=False,
+                require_astar=True,
             )
             if best_candidate is None:
                 rejection_stats['unreachable'] += 1
                 self.record_cluster_rejection(cluster, 'unreachable')
                 continue
+            if best_candidate.get('deferred'):
+                rejection_stats['deferred_visibility'] += 1
+                self.remember_deferred_cluster(cluster)
+                continue
             goal_world = best_candidate['goal']
             distance = best_candidate['path_cost']
+            cluster.observation_target_world = best_candidate.get(
+                'observation_target',
+                cluster.centroid_world,
+            )
             angular_penalty = abs(self.normalize_angle(
                 math.atan2(
                     goal_world[1] - robot_pose[1],
@@ -896,8 +1053,8 @@ class RalcFrontierPlanner(Node):
         best = min(candidates, key=lambda score: score.total_cost, default=None)
         if best is not None:
             self.get_logger().warn(
-                '[RALC] A* rejected all clusters; publishing recovery frontier '
-                f'goal instead of staying stuck. cluster={best.cluster.cluster_id}, '
+                '[RALC] Publishing gated recovery frontier goal after A* validation. '
+                f'cluster={best.cluster.cluster_id}, '
                 f'goal=({best.cluster.goal_world[0]:.2f},'
                 f'{best.cluster.goal_world[1]:.2f}), '
                 f'distance={best.path_cost:.2f}'
@@ -914,13 +1071,38 @@ class RalcFrontierPlanner(Node):
         require_astar=True,
     ):
         candidates = []
+        saw_reachable_low_visibility = False
+        saw_only_visibility_failures = True
         for shift in shifts:
-            candidate_goal = self.shift_goal_toward_robot(
-                cluster.centroid_world,
-                robot_pose[0],
-                robot_pose[1],
-                shift,
+            candidate_goal, observation_target = (
+                self.observation_candidate_for_cluster(
+                    grid,
+                    cluster,
+                    robot_pose,
+                    shift,
+                )
             )
+            blacklist_record = self.blacklist_record_for_candidate(candidate_goal)
+            if blacklist_record is not None:
+                saw_only_visibility_failures = False
+                self.rejected_goal_candidates.append({
+                    'goal': candidate_goal,
+                    'reason': 'blacklisted',
+                    'label': 'OBSERVATION_POSE_REJECTED',
+                })
+                rejection_stats['blacklisted'] += 1
+                if (
+                    blacklist_record.get('failure_type') ==
+                    'INEFFECTIVE_OBSERVATION_GOAL'
+                ):
+                    rejection_stats['ineffective_observation'] += 1
+                    self.get_logger().warn(
+                        '[RALC] rejected_ineffective_observation: '
+                        f'cluster={cluster.cluster_id}, '
+                        f'candidate=({candidate_goal[0]:.2f},'
+                        f'{candidate_goal[1]:.2f})'
+                    )
+                continue
             reason = self.candidate_rejection_reason(
                 grid,
                 candidate_goal,
@@ -929,9 +1111,11 @@ class RalcFrontierPlanner(Node):
                 require_astar=require_astar,
             )
             if reason is not None:
+                saw_only_visibility_failures = False
                 self.rejected_goal_candidates.append({
                     'goal': candidate_goal,
                     'reason': reason,
+                    'label': 'OBSERVATION_POSE_REJECTED',
                 })
                 if reason == 'occupied':
                     rejection_stats['safety'] += 1
@@ -939,6 +1123,8 @@ class RalcFrontierPlanner(Node):
                     rejection_stats['unknown'] += 1
                 elif reason == 'costmap':
                     rejection_stats['costmap'] += 1
+                elif reason == 'frontier_line_occupied':
+                    rejection_stats['safety'] += 1
                 elif reason == 'too_close':
                     rejection_stats['too_close'] += 1
                 elif reason == 'too_far_from_frontier':
@@ -957,6 +1143,7 @@ class RalcFrontierPlanner(Node):
                     self.rejected_goal_candidates.append({
                         'goal': candidate_goal,
                         'reason': 'unreachable',
+                        'label': 'OBSERVATION_POSE_REJECTED',
                     })
                     rejection_stats['unreachable'] += 1
                     continue
@@ -965,17 +1152,48 @@ class RalcFrontierPlanner(Node):
                     candidate_goal[1] - robot_pose[1],
                 )
 
+            visible_unknown_gain = self.visible_unknown_gain(
+                grid,
+                candidate_goal,
+                cluster,
+            )
+            if visible_unknown_gain < self.min_visible_unknown_gain:
+                saw_reachable_low_visibility = True
+                rejection_stats['observation_pose_no_visible_unknown'] += 1
+                if self.reject_observation_pose_no_visible_unknown:
+                    self.rejected_goal_candidates.append({
+                        'goal': candidate_goal,
+                        'reason': 'OBSERVATION_POSE_NO_VISIBLE_UNKNOWN',
+                        'label': 'OBSERVATION_POSE_REJECTED',
+                        'visible_unknown_gain': visible_unknown_gain,
+                    })
+                    continue
+            saw_only_visibility_failures = False
+
             clearance = self.clearance_to_blocked_cells(grid, candidate_goal)
             frontier_distance = math.hypot(
                 candidate_goal[0] - cluster.centroid_world[0],
                 candidate_goal[1] - cluster.centroid_world[1],
             )
-            score = path_cost + 0.20 * frontier_distance - 0.40 * clearance
+            score = (
+                path_cost +
+                0.20 * frontier_distance -
+                0.40 * clearance -
+                0.01 * float(visible_unknown_gain)
+            )
+            self.valid_visible_goal_candidates.append({
+                'goal': candidate_goal,
+                'cluster_id': cluster.cluster_id,
+                'visible_unknown_gain': visible_unknown_gain,
+                'observation_target': observation_target,
+            })
             candidates.append({
                 'goal': candidate_goal,
+                'observation_target': observation_target,
                 'path_cost': path_cost,
                 'clearance': clearance,
                 'frontier_distance': frontier_distance,
+                'visible_unknown_gain': visible_unknown_gain,
                 'score': score,
             })
 
@@ -987,8 +1205,15 @@ class RalcFrontierPlanner(Node):
                 f'goal=({best["goal"][0]:.2f},{best["goal"][1]:.2f}), '
                 f'path={best["path_cost"]:.2f}, '
                 f'clearance={best["clearance"]:.2f}, '
-                f'frontier_distance={best["frontier_distance"]:.2f}'
+                f'frontier_distance={best["frontier_distance"]:.2f}, '
+                f'visible_unknown_gain={best["visible_unknown_gain"]}'
             )
+        elif (
+            saw_reachable_low_visibility and
+            saw_only_visibility_failures
+        ):
+            self.defer_frontier_cluster(cluster, robot_pose)
+            return {'deferred': True}
         return best
 
     def candidate_rejection_reason(
@@ -1011,10 +1236,26 @@ class RalcFrontierPlanner(Node):
         )
         if frontier_distance > self.max_frontier_observation_distance:
             return 'too_far_from_frontier'
+        cell = self.world_to_cell(grid, candidate_goal[0], candidate_goal[1])
+        if cell is None:
+            return 'unknown'
+        image = np.array(grid.data, dtype=np.int16).reshape(
+            (grid.info.height, grid.info.width)
+        )
+        if image[cell[1], cell[0]] > 50:
+            return 'occupied'
+        if image[cell[1], cell[0]] == -1:
+            return 'unknown'
         if not self.goal_has_margin(grid, candidate_goal, occupied=True):
             return 'occupied'
         if not self.goal_has_margin(grid, candidate_goal, occupied=False):
             return 'unknown'
+        if self.line_to_frontier_crosses_occupied(
+            grid,
+            candidate_goal,
+            frontier_world,
+        ):
+            return 'frontier_line_occupied'
         if self.goal_is_in_inflated_costmap(candidate_goal):
             return 'costmap'
         if require_astar and self.astar_path_distance(
@@ -1024,6 +1265,96 @@ class RalcFrontierPlanner(Node):
         ) is None:
             return 'unreachable'
         return None
+
+    def visible_unknown_gain(self, grid, candidate_goal, cluster):
+        candidate_cell = self.world_to_cell(grid, candidate_goal[0], candidate_goal[1])
+        if candidate_cell is None:
+            return 0
+        image = np.array(grid.data, dtype=np.int16).reshape(
+            (grid.info.height, grid.info.width)
+        )
+        unknown_targets = self.cluster_unknown_neighbor_cells(image, cluster)
+        visible = set()
+        max_targets = 250
+        if len(unknown_targets) > max_targets:
+            step = max(1, len(unknown_targets) // max_targets)
+            unknown_targets = unknown_targets[::step]
+        for target in unknown_targets:
+            if self.has_line_of_sight_to_unknown(image, candidate_cell, target):
+                visible.add(target)
+        return len(visible)
+
+    def cluster_unknown_neighbor_cells(self, image, cluster):
+        targets = set()
+        height, width = image.shape
+        for cell_x, cell_y in cluster.cells:
+            x = int(cell_x)
+            y = int(cell_y)
+            for ny in range(max(0, y - 1), min(height, y + 2)):
+                for nx in range(max(0, x - 1), min(width, x + 2)):
+                    if image[ny, nx] == -1:
+                        targets.add((nx, ny))
+        return sorted(targets)
+
+    def has_line_of_sight_to_unknown(self, image, start, target):
+        cells = self.bresenham_line(start[0], start[1], target[0], target[1])
+        if not cells:
+            return False
+        for index, (x, y) in enumerate(cells):
+            if x < 0 or y < 0 or y >= image.shape[0] or x >= image.shape[1]:
+                return False
+            value = image[y, x]
+            if index == len(cells) - 1:
+                return value == -1
+            if value > 50:
+                return False
+            if value == -1:
+                return False
+        return False
+
+    def line_to_frontier_crosses_occupied(self, grid, candidate_goal, frontier_world):
+        start = self.world_to_cell(grid, candidate_goal[0], candidate_goal[1])
+        target = self.world_to_cell(grid, frontier_world[0], frontier_world[1])
+        if start is None or target is None:
+            return True
+        image = np.array(grid.data, dtype=np.int16).reshape(
+            (grid.info.height, grid.info.width)
+        )
+        cells = self.bresenham_line(start[0], start[1], target[0], target[1])
+        if not cells:
+            return True
+        for x, y in cells:
+            if x < 0 or y < 0 or y >= image.shape[0] or x >= image.shape[1]:
+                return True
+            if image[y, x] > 50:
+                return True
+        return False
+
+    def bresenham_line(self, x0, y0, x1, y1):
+        x0 = int(x0)
+        y0 = int(y0)
+        x1 = int(x1)
+        y1 = int(y1)
+        points = []
+        dx = abs(x1 - x0)
+        dy = -abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        error = dx + dy
+        x = x0
+        y = y0
+        while True:
+            points.append((x, y))
+            if x == x1 and y == y1:
+                break
+            e2 = 2 * error
+            if e2 >= dy:
+                error += dy
+                x += sx
+            if e2 <= dx:
+                error += dx
+                y += sy
+        return points
 
     def goal_has_margin(self, grid, goal_world, occupied=True):
         cell = self.world_to_cell(grid, goal_world[0], goal_world[1])
@@ -1148,6 +1479,11 @@ class RalcFrontierPlanner(Node):
     def frontier_status_reason(self, raw_mask, region_mask, clusters, rejection_stats):
         if int(region_mask.sum()) == 0 and not clusters:
             return 'NO_FRONTIER_IN_REGION'
+        if (
+            int(rejection_stats.get('deferred_visibility', 0)) >=
+            self.max_deferred_frontiers_before_region_growth
+        ):
+            return 'NO_ACTIONABLE_FRONTIER_IN_REGION'
         if self.all_region_clusters_are_non_actionable(clusters, rejection_stats):
             if not self.all_cluster_rejections_are_explicit(
                 clusters,
@@ -1175,10 +1511,14 @@ class RalcFrontierPlanner(Node):
         occupancy_stats,
         actionable_clusters,
         non_actionable_clusters,
+        observation_report=None,
     ):
-        completion_allowed = self.completion_allowed_by_unknown(occupancy_stats)
-        msg = String()
-        msg.data = json.dumps({
+        deferred_count = self.active_deferred_frontier_count()
+        completion_allowed = (
+            self.completion_allowed_by_unknown(occupancy_stats) and
+            deferred_count == 0
+        )
+        payload = {
             'reason': reason,
             'region_id': self.current_region.get('region_id'),
             'clusters': cluster_count,
@@ -1186,8 +1526,14 @@ class RalcFrontierPlanner(Node):
             'actionable_clusters': actionable_clusters,
             'non_actionable_clusters': non_actionable_clusters,
             'completion_allowed': completion_allowed,
+            'deferred_frontier_clusters': deferred_count,
+            'map_update_count': self.map_update_count,
             **occupancy_stats,
-        })
+        }
+        if observation_report:
+            payload.update(observation_report)
+        msg = String()
+        msg.data = json.dumps(payload)
         self.no_frontier_pub.publish(msg)
         self.get_logger().info(f'[RALC] no_frontier_in_region: {msg.data}')
 
@@ -1200,11 +1546,16 @@ class RalcFrontierPlanner(Node):
         occupancy_stats,
         actionable_clusters,
         non_actionable_clusters,
+        selected_score=None,
+        observation_report=None,
     ):
         repeated_count = self.max_rejection_count_for_current_region()
-        completion_allowed = self.completion_allowed_by_unknown(occupancy_stats)
-        msg = String()
-        msg.data = json.dumps({
+        deferred_count = self.active_deferred_frontier_count()
+        completion_allowed = (
+            self.completion_allowed_by_unknown(occupancy_stats) and
+            deferred_count == 0
+        )
+        payload = {
             'reason': reason,
             'region_id': self.current_region.get('region_id'),
             'clusters': cluster_count,
@@ -1218,9 +1569,44 @@ class RalcFrontierPlanner(Node):
             'rejected_too_close': int(rejection_stats.get('too_close', 0)),
             'rejected_unreachable': int(rejection_stats.get('unreachable', 0)),
             'rejected_blacklisted': int(rejection_stats.get('blacklisted', 0)),
+            'rejected_ineffective_observation': int(
+                rejection_stats.get('ineffective_observation', 0)
+            ),
+            'rejected_observation_pose_no_visible_unknown': int(
+                rejection_stats.get('observation_pose_no_visible_unknown', 0)
+            ),
+            'deferred_frontier_clusters': deferred_count,
+            'deferred_frontiers_before_region_growth': (
+                self.max_deferred_frontiers_before_region_growth
+            ),
             'repeated_count': repeated_count,
+            'map_update_count': self.map_update_count,
             **occupancy_stats,
-        })
+        }
+        if selected_score is not None:
+            observation_target = getattr(
+                selected_score.cluster,
+                'observation_target_world',
+                selected_score.cluster.centroid_world,
+            )
+            observation_yaw = math.atan2(
+                observation_target[1] - selected_score.cluster.goal_world[1],
+                observation_target[0] - selected_score.cluster.goal_world[0],
+            )
+            payload.update({
+                'selected_cluster_id': selected_score.cluster.cluster_id,
+                'selected_goal_x': selected_score.cluster.goal_world[0],
+                'selected_goal_y': selected_score.cluster.goal_world[1],
+                'selected_centroid_x': selected_score.cluster.centroid_world[0],
+                'selected_centroid_y': selected_score.cluster.centroid_world[1],
+                'selected_observation_target_x': observation_target[0],
+                'selected_observation_target_y': observation_target[1],
+                'selected_observation_yaw': observation_yaw,
+            })
+        if observation_report:
+            payload.update(observation_report)
+        msg = String()
+        msg.data = json.dumps(payload)
         self.status_pub.publish(msg)
         if reason == 'REGION_STATS':
             self.get_logger().info(f'[RALC] frontier_planner_status: {msg.data}')
@@ -1245,6 +1631,7 @@ class RalcFrontierPlanner(Node):
             int(rejection_stats.get('too_close', 0)) +
             int(rejection_stats.get('non_actionable', 0)) +
             int(rejection_stats.get('blacklisted', 0)) +
+            int(rejection_stats.get('ineffective_observation', 0)) +
             int(rejection_stats.get('costmap', 0)) +
             int(rejection_stats.get('unknown', 0))
         )
@@ -1349,23 +1736,52 @@ class RalcFrontierPlanner(Node):
         now = self.now_sec()
         expired = [
             key for key, record in self.failed_goal_blacklist.items()
-            if now - float(record.get('timestamp', 0.0)) >
-            self.failed_goal_blacklist_seconds
+            if now - float(record.get('timestamp', 0.0)) > float(
+                record.get('blacklist_seconds', self.failed_goal_blacklist_seconds)
+            )
         ]
         for key in expired:
             self.failed_goal_blacklist.pop(key, None)
 
     def cluster_is_failed_goal_blacklisted(self, cluster):
+        return self.blacklist_record_for_cluster(cluster) is not None
+
+    def blacklist_record_for_candidate(self, candidate_goal):
         if self.current_region is None:
-            return False
+            return None
+        self.prune_expired_failed_goal_blacklist()
+        region_id = int(self.current_region.get('region_id', 0))
+        for record in self.failed_goal_blacklist.values():
+            if int(record.get('region_id', -1)) != region_id:
+                continue
+            aliasing_distance = float(
+                record.get('aliasing_distance', self.failed_goal_aliasing_distance)
+            )
+            failed_goal = (
+                float(record.get('failed_goal_x', 0.0)),
+                float(record.get('failed_goal_y', 0.0)),
+            )
+            if math.hypot(
+                candidate_goal[0] - failed_goal[0],
+                candidate_goal[1] - failed_goal[1],
+            ) <= aliasing_distance:
+                return record
+        return None
+
+    def blacklist_record_for_cluster(self, cluster):
+        if self.current_region is None:
+            return None
         self.prune_expired_failed_goal_blacklist()
         region_id = int(self.current_region.get('region_id', 0))
         cluster_key = self.cluster_identity_for_region(cluster, region_id)
         if cluster_key in self.failed_goal_blacklist:
-            return True
+            return self.failed_goal_blacklist[cluster_key]
         for record in self.failed_goal_blacklist.values():
             if int(record.get('region_id', -1)) != region_id:
                 continue
+            aliasing_distance = float(
+                record.get('aliasing_distance', self.failed_goal_aliasing_distance)
+            )
             failed_goal = (
                 float(record.get('failed_goal_x', 0.0)),
                 float(record.get('failed_goal_y', 0.0)),
@@ -1373,14 +1789,225 @@ class RalcFrontierPlanner(Node):
             if math.hypot(
                 cluster.goal_world[0] - failed_goal[0],
                 cluster.goal_world[1] - failed_goal[1],
-            ) <= self.failed_goal_aliasing_distance:
-                return True
+            ) <= aliasing_distance:
+                return record
             if math.hypot(
                 cluster.centroid_world[0] - failed_goal[0],
                 cluster.centroid_world[1] - failed_goal[1],
-            ) <= self.failed_goal_aliasing_distance:
+            ) <= aliasing_distance:
+                return record
+        return None
+
+    def evaluate_pending_observation(self, clusters, frontier_cells_after):
+        if (
+            self.pending_observation_goal is None or
+            self.pending_observation_execution is None
+        ):
+            self.last_observation_report = None
+            return None
+        pending = self.pending_observation_goal
+        execution = self.pending_observation_execution
+        if self.current_region is None:
+            self.pending_observation_goal = None
+            self.pending_observation_execution = None
+            self.last_observation_report = None
+            return None
+        region_id = int(self.current_region.get('region_id'))
+        if int(pending.get('region_id', -1)) != region_id:
+            self.pending_observation_goal = None
+            self.pending_observation_execution = None
+            self.last_observation_report = None
+            return None
+
+        frontiers_before = int(
+            pending.get('previous_frontier_cells_in_region', frontier_cells_after)
+        )
+        clusters_before = int(pending.get('previous_clusters', len(clusters)))
+        cluster, cluster_distance = self.find_cluster_near_centroid(
+            clusters,
+            (
+                float(pending.get('selected_centroid_x')),
+                float(pending.get('selected_centroid_y')),
+            ),
+            self.ineffective_goal_aliasing_distance,
+        )
+        selected_cluster_still_present = cluster is not None
+        map_update_increased = (
+            self.map_update_count > int(pending.get('map_update_count_before', -1))
+        )
+        travel = float(execution.get('robot_travel_distance') or 0.0)
+        frontier_reduction = max(0, frontiers_before - int(frontier_cells_after))
+        frontier_reduction_ratio = (
+            float(frontier_reduction) / float(frontiers_before)
+            if frontiers_before > 0 else 0.0
+        )
+        no_travel = travel < self.min_observation_travel_distance
+        no_frontier_reduction = (
+            frontier_reduction_ratio < self.min_frontier_reduction_ratio
+        )
+        ineffective = (
+            no_travel and
+            no_frontier_reduction and
+            selected_cluster_still_present
+        )
+        reason = 'OBSERVATION_EFFECTIVE'
+        if ineffective:
+            reason = 'NO_TRAVEL_NO_FRONTIER_REDUCTION'
+            cluster_key = self.point_identity_for_region(
+                float(pending.get('selected_centroid_x')),
+                float(pending.get('selected_centroid_y')),
+                region_id,
+            )
+            attempts = self.ineffective_observation_attempts.get(cluster_key, 0) + 1
+            self.ineffective_observation_attempts[cluster_key] = attempts
+            self.failed_goal_blacklist[cluster_key] = {
+                'region_id': region_id,
+                'centroid_x': float(pending.get('selected_centroid_x')),
+                'centroid_y': float(pending.get('selected_centroid_y')),
+                'failed_goal_x': float(pending.get('selected_goal_x')),
+                'failed_goal_y': float(pending.get('selected_goal_y')),
+                'failure_type': 'INEFFECTIVE_OBSERVATION_GOAL',
+                'message': reason,
+                'timestamp': self.now_sec(),
+                'blacklist_seconds': self.ineffective_goal_blacklist_seconds,
+                'aliasing_distance': self.ineffective_goal_aliasing_distance,
+            }
+            self.get_logger().warn(
+                '[RALC] Observation result: '
+                f'cluster={pending.get("selected_cluster_id")}, '
+                f'goal=({float(pending.get("selected_goal_x")):.2f},'
+                f'{float(pending.get("selected_goal_y")):.2f}), '
+                f'travel={travel:.2f}m, '
+                f'frontiers_before={frontiers_before}, '
+                f'frontiers_after={int(frontier_cells_after)}, '
+                f'clusters_before={clusters_before}, '
+                f'clusters_after={len(clusters)}, '
+                f'map_update_count_before={pending.get("map_update_count_before")}, '
+                f'map_update_count_after={self.map_update_count}, '
+                f'effective=false, reason={reason}. '
+                'Blacklisting observation goal.'
+            )
+        else:
+            if travel >= self.min_observation_travel_distance:
+                reason = 'ROBOT_TRAVEL'
+            elif frontier_reduction_ratio >= self.min_frontier_reduction_ratio:
+                reason = 'FRONTIER_REDUCTION'
+            elif not selected_cluster_still_present:
+                reason = 'SELECTED_CLUSTER_DISAPPEARED'
+            self.get_logger().info(
+                '[RALC] Observation result: '
+                f'cluster={pending.get("selected_cluster_id")}, '
+                f'goal=({float(pending.get("selected_goal_x")):.2f},'
+                f'{float(pending.get("selected_goal_y")):.2f}), '
+                f'travel={travel:.2f}m, '
+                f'frontiers_before={frontiers_before}, '
+                f'frontiers_after={int(frontier_cells_after)}, '
+                f'clusters_before={clusters_before}, '
+                f'clusters_after={len(clusters)}, '
+                f'effective=true, reason={reason}.'
+            )
+
+        report = {
+            'previous_frontier_cells_in_region': frontiers_before,
+            'previous_clusters': clusters_before,
+            'selected_cluster_id': pending.get('selected_cluster_id'),
+            'selected_goal_x': pending.get('selected_goal_x'),
+            'selected_goal_y': pending.get('selected_goal_y'),
+            'selected_centroid_x': pending.get('selected_centroid_x'),
+            'selected_centroid_y': pending.get('selected_centroid_y'),
+            'frontier_cells_after': int(frontier_cells_after),
+            'clusters_after': len(clusters),
+            'selected_cluster_still_present': selected_cluster_still_present,
+            'selected_cluster_distance': cluster_distance,
+            'map_update_count_before': pending.get('map_update_count_before'),
+            'map_update_count_after': self.map_update_count,
+            'map_update_count_increased': map_update_increased,
+            'robot_travel_distance': travel,
+            'frontier_reduction_ratio': frontier_reduction_ratio,
+            'observation_effective': not ineffective,
+            'observation_reason': reason,
+        }
+        self.last_observation_report = report
+        self.pending_observation_goal = None
+        self.pending_observation_execution = None
+        return report
+
+    def find_cluster_near_centroid(self, clusters, centroid, max_distance):
+        best = None
+        best_distance = None
+        for cluster in clusters:
+            distance = math.hypot(
+                cluster.centroid_world[0] - centroid[0],
+                cluster.centroid_world[1] - centroid[1],
+            )
+            if best_distance is None or distance < best_distance:
+                best = cluster
+                best_distance = distance
+        if best is None or best_distance is None or best_distance > max_distance:
+            return None, None
+        return best, best_distance
+
+    def defer_frontier_cluster(self, cluster, robot_pose):
+        key = self.cluster_identity(cluster)
+        now = self.now_sec()
+        self.deferred_frontier_clusters[key] = {
+            'region_id': key[0],
+            'centroid_x': cluster.centroid_world[0],
+            'centroid_y': cluster.centroid_world[1],
+            'cluster_id': cluster.cluster_id,
+            'first_seen_sec': self.deferred_frontier_clusters.get(
+                key, {}
+            ).get('first_seen_sec', now),
+            'last_seen_sec': now,
+            'robot_x': robot_pose[0],
+            'robot_y': robot_pose[1],
+            'reason': 'DEFERRED_WALL_BLOCKED_OR_NO_VIEWPOINT',
+        }
+        self.remember_deferred_cluster(cluster)
+        self.get_logger().warn(
+            '[RALC] DEFERRED_FRONTIER_CLUSTER: '
+            f'cluster={cluster.cluster_id}, '
+            f'centroid=({cluster.centroid_world[0]:.2f},'
+            f'{cluster.centroid_world[1]:.2f}), '
+            'reason=DEFERRED_WALL_BLOCKED_OR_NO_VIEWPOINT'
+        )
+
+    def remember_deferred_cluster(self, cluster):
+        if not any(existing.cluster_id == cluster.cluster_id for existing in self.last_deferred_clusters):
+            self.last_deferred_clusters.append(cluster)
+
+    def should_recheck_deferred_frontiers(self, robot_pose):
+        if not self.deferred_frontier_clusters:
+            return False
+        now = self.now_sec()
+        for record in self.deferred_frontier_clusters.values():
+            if (
+                now - float(record.get('last_seen_sec', 0.0)) >=
+                self.deferred_frontier_timeout_sec
+            ):
                 return True
-        return False
+        if self.last_deferred_recheck_robot_pose is None:
+            return True
+        return (
+            math.hypot(
+                robot_pose[0] - self.last_deferred_recheck_robot_pose[0],
+                robot_pose[1] - self.last_deferred_recheck_robot_pose[1],
+            ) >= self.deferred_frontier_recheck_distance
+        )
+
+    def active_deferred_frontier_count(self):
+        if self.current_region is None:
+            return 0
+        region_id = int(self.current_region.get('region_id', 0) or 0)
+        now = self.now_sec()
+        return sum(
+            1 for record in self.deferred_frontier_clusters.values()
+            if (
+                int(record.get('region_id', -1)) == region_id and
+                now - float(record.get('last_seen_sec', 0.0)) <=
+                self.deferred_frontier_timeout_sec
+            )
+        )
 
     def all_region_clusters_are_non_actionable(self, clusters, rejection_stats):
         if not clusters:
@@ -1391,17 +2018,14 @@ class RalcFrontierPlanner(Node):
             int(rejection_stats.get('unreachable', 0)) +
             int(rejection_stats.get('too_close', 0)) +
             int(rejection_stats.get('non_actionable', 0)) +
-            int(rejection_stats.get('blacklisted', 0))
+            int(rejection_stats.get('blacklisted', 0)) +
+            int(rejection_stats.get('ineffective_observation', 0))
         )
         if rejected < len(clusters):
             return False
         if int(rejection_stats.get('too_small', 0)) == len(clusters):
             return True
         if int(rejection_stats.get('non_actionable', 0)) == len(clusters):
-            return True
-        if int(rejection_stats.get('blacklisted', 0)) == len(clusters):
-            return True
-        if self.failed_goal_count_for_current_region() >= self.max_failed_goals_per_region:
             return True
         return (
             self.max_rejection_count_for_current_region() >=
@@ -1414,6 +2038,7 @@ class RalcFrontierPlanner(Node):
             int(rejection_stats.get('safety', 0)) +
             int(rejection_stats.get('unreachable', 0)) +
             int(rejection_stats.get('blacklisted', 0)) +
+            int(rejection_stats.get('ineffective_observation', 0)) +
             int(rejection_stats.get('costmap', 0)) +
             int(rejection_stats.get('unknown', 0))
         )
@@ -1522,6 +2147,56 @@ class RalcFrontierPlanner(Node):
         return (
             frontier_world[0] + shift * dx / distance,
             frontier_world[1] + shift * dy / distance,
+        )
+
+    def observation_candidate_for_cluster(self, grid, cluster, robot_pose, shift):
+        unknown_centroid = self.cluster_unknown_centroid_world(grid, cluster)
+        if unknown_centroid is None:
+            return (
+                self.shift_goal_toward_robot(
+                    cluster.centroid_world,
+                    robot_pose[0],
+                    robot_pose[1],
+                    shift,
+                ),
+                cluster.centroid_world,
+            )
+        dx = unknown_centroid[0] - cluster.centroid_world[0]
+        dy = unknown_centroid[1] - cluster.centroid_world[1]
+        distance = math.hypot(dx, dy)
+        if distance < 1e-6:
+            return (
+                self.shift_goal_toward_robot(
+                    cluster.centroid_world,
+                    robot_pose[0],
+                    robot_pose[1],
+                    shift,
+                ),
+                unknown_centroid,
+            )
+        # Frontier cells sit between free and unknown space. A useful
+        # observation pose is on the known/free side, facing the unknown side.
+        return (
+            (
+                cluster.centroid_world[0] - float(shift) * dx / distance,
+                cluster.centroid_world[1] - float(shift) * dy / distance,
+            ),
+            unknown_centroid,
+        )
+
+    def cluster_unknown_centroid_world(self, grid, cluster):
+        image = np.array(grid.data, dtype=np.int16).reshape(
+            (grid.info.height, grid.info.width)
+        )
+        unknown_cells = self.cluster_unknown_neighbor_cells(image, cluster)
+        if not unknown_cells:
+            return None
+        xs = [cell[0] for cell in unknown_cells]
+        ys = [cell[1] for cell in unknown_cells]
+        return self.map_cell_to_world(
+            grid,
+            float(sum(xs)) / float(len(xs)),
+            float(sum(ys)) / float(len(ys)),
         )
 
     def world_to_cell(self, grid, world_x, world_y):
@@ -1716,21 +2391,118 @@ class RalcFrontierPlanner(Node):
                 arrow.pose.position.x = cluster.goal_world[0]
                 arrow.pose.position.y = cluster.goal_world[1]
                 arrow.pose.position.z = 0.2
-                arrow.pose.orientation.w = 1.0
+                observation_target = getattr(
+                    cluster,
+                    'observation_target_world',
+                    cluster.centroid_world,
+                )
+                yaw = math.atan2(
+                    observation_target[1] - cluster.goal_world[1],
+                    observation_target[0] - cluster.goal_world[0],
+                )
+                arrow.pose.orientation.z = math.sin(0.5 * yaw)
+                arrow.pose.orientation.w = math.cos(0.5 * yaw)
                 arrow.scale.x = 0.4
                 arrow.scale.y = 0.08
                 arrow.scale.z = 0.08
-                arrow.color.r = 1.0
-                arrow.color.g = 0.45 if best_is_recovery else 0.85
+                arrow.color.r = 0.05 if not best_is_recovery else 1.0
+                arrow.color.g = 0.95 if not best_is_recovery else 0.45
                 arrow.color.b = 0.0
                 arrow.color.a = 0.95
                 marker_array.markers.append(arrow)
+        self.append_valid_visible_goal_markers(marker_array, stamp, frame_id)
+        self.append_deferred_frontier_markers(marker_array, stamp, frame_id)
         self.append_rejected_candidate_markers(marker_array, stamp, frame_id)
         self.marker_pub.publish(marker_array)
         self.legacy_marker_pub.publish(marker_array)
 
+    def append_valid_visible_goal_markers(self, marker_array, stamp, frame_id):
+        for index, candidate in enumerate(self.valid_visible_goal_candidates):
+            marker = Marker()
+            marker.header.stamp = stamp
+            marker.header.frame_id = frame_id
+            marker.ns = 'ralc_valid_visible_observation_goals'
+            marker.id = 20000 + index
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.pose.position.x = candidate['goal'][0]
+            marker.pose.position.y = candidate['goal'][1]
+            marker.pose.position.z = 0.26
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 0.13
+            marker.scale.y = 0.13
+            marker.scale.z = 0.13
+            marker.color.r = 0.05
+            marker.color.g = 1.0
+            marker.color.b = 0.15
+            marker.color.a = 0.85
+            marker_array.markers.append(marker)
+
+            label = Marker()
+            label.header.stamp = stamp
+            label.header.frame_id = frame_id
+            label.ns = 'ralc_valid_visible_observation_goal_labels'
+            label.id = 21000 + index
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x = candidate['goal'][0]
+            label.pose.position.y = candidate['goal'][1]
+            label.pose.position.z = 0.48
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.14
+            label.color.r = 0.4
+            label.color.g = 1.0
+            label.color.b = 0.4
+            label.color.a = 0.9
+            label.text = 'FRONTIER_DISCOVERED'
+            marker_array.markers.append(label)
+
+    def append_deferred_frontier_markers(self, marker_array, stamp, frame_id):
+        for index, cluster in enumerate(self.last_deferred_clusters):
+            marker = Marker()
+            marker.header.stamp = stamp
+            marker.header.frame_id = frame_id
+            marker.ns = 'ralc_deferred_frontier_clusters'
+            marker.id = 22000 + index
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.pose.position.x = cluster.centroid_world[0]
+            marker.pose.position.y = cluster.centroid_world[1]
+            marker.pose.position.z = 0.30
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 0.28
+            marker.scale.y = 0.28
+            marker.scale.z = 0.12
+            marker.color.r = 1.0
+            marker.color.g = 0.55
+            marker.color.b = 0.0
+            marker.color.a = 0.9
+            marker_array.markers.append(marker)
+
+            label = Marker()
+            label.header.stamp = stamp
+            label.header.frame_id = frame_id
+            label.ns = 'ralc_deferred_frontier_cluster_labels'
+            label.id = 23000 + index
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x = cluster.centroid_world[0]
+            label.pose.position.y = cluster.centroid_world[1]
+            label.pose.position.z = 0.58
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.16
+            label.color.r = 1.0
+            label.color.g = 0.65
+            label.color.b = 0.1
+            label.color.a = 0.95
+            label.text = 'DEFERRED_FRONTIER_CLUSTER'
+            marker_array.markers.append(label)
+
     def append_rejected_candidate_markers(self, marker_array, stamp, frame_id):
         for index, candidate in enumerate(self.rejected_goal_candidates):
+            visibility_reject = (
+                candidate['reason'] == 'OBSERVATION_POSE_NO_VISIBLE_UNKNOWN'
+            )
             marker = Marker()
             marker.header.stamp = stamp
             marker.header.frame_id = frame_id
@@ -1745,9 +2517,9 @@ class RalcFrontierPlanner(Node):
             marker.scale.x = 0.12
             marker.scale.y = 0.12
             marker.scale.z = 0.08
-            marker.color.r = 1.0
-            marker.color.g = 0.25
-            marker.color.b = 0.0
+            marker.color.r = 1.0 if visibility_reject else 0.55
+            marker.color.g = 0.05 if visibility_reject else 0.55
+            marker.color.b = 0.0 if visibility_reject else 0.55
             marker.color.a = 0.75
             marker_array.markers.append(marker)
 
@@ -1763,11 +2535,13 @@ class RalcFrontierPlanner(Node):
             label.pose.position.z = 0.42
             label.pose.orientation.w = 1.0
             label.scale.z = 0.16
-            label.color.r = 1.0
-            label.color.g = 0.45
-            label.color.b = 0.1
+            label.color.r = 1.0 if visibility_reject else 0.75
+            label.color.g = 0.2 if visibility_reject else 0.75
+            label.color.b = 0.1 if visibility_reject else 0.75
             label.color.a = 0.9
-            label.text = candidate['reason']
+            label.text = (
+                f'OBSERVATION_POSE_REJECTED:{candidate["reason"]}'
+            )
             marker_array.markers.append(label)
 
     def publish_non_actionable_markers(self, grid, clusters):
@@ -1843,6 +2617,8 @@ class RalcFrontierPlanner(Node):
 
         marker_id = 1
         for record in self.failed_goal_blacklist.values():
+            failure_type = str(record.get('failure_type', 'NAV2_FAILED'))
+            ineffective = failure_type == 'INEFFECTIVE_OBSERVATION'
             sphere = Marker()
             sphere.header.stamp = stamp
             sphere.header.frame_id = frame_id
@@ -1857,9 +2633,9 @@ class RalcFrontierPlanner(Node):
             sphere.scale.x = 0.28
             sphere.scale.y = 0.28
             sphere.scale.z = 0.12
-            sphere.color.r = 1.0
-            sphere.color.g = 0.0
-            sphere.color.b = 0.0
+            sphere.color.r = 0.75 if ineffective else 1.0
+            sphere.color.g = 0.25 if ineffective else 0.0
+            sphere.color.b = 1.0 if ineffective else 0.0
             sphere.color.a = 0.9
             marker_array.markers.append(sphere)
 
@@ -1872,9 +2648,9 @@ class RalcFrontierPlanner(Node):
             cross.action = Marker.ADD
             cross.pose.orientation.w = 1.0
             cross.scale.x = 0.06
-            cross.color.r = 1.0
-            cross.color.g = 0.0
-            cross.color.b = 0.0
+            cross.color.r = 0.75 if ineffective else 1.0
+            cross.color.g = 0.25 if ineffective else 0.0
+            cross.color.b = 1.0 if ineffective else 0.0
             cross.color.a = 0.95
             cx = float(record.get('failed_goal_x', 0.0))
             cy = float(record.get('failed_goal_y', 0.0))
@@ -1905,11 +2681,11 @@ class RalcFrontierPlanner(Node):
             label.pose.position.z = 0.62
             label.pose.orientation.w = 1.0
             label.scale.z = 0.22
-            label.color.r = 1.0
-            label.color.g = 0.15
-            label.color.b = 0.15
+            label.color.r = 0.8 if ineffective else 1.0
+            label.color.g = 0.35 if ineffective else 0.15
+            label.color.b = 1.0 if ineffective else 0.15
             label.color.a = 0.95
-            label.text = str(record.get('failure_type', 'NAV2_FAILED'))
+            label.text = failure_type
             marker_array.markers.append(label)
 
             marker_id += 1

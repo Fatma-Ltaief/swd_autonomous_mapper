@@ -36,6 +36,19 @@ class RegionManager(Node):
         self.declare_parameter('region_transition_step', 1.0)
         self.declare_parameter('max_new_region_overlap_ratio', 0.45)
         self.declare_parameter('min_new_region_outside_ratio', 0.40)
+        self.declare_parameter('max_completed_overlap_ratio_for_next_region', 0.55)
+        self.declare_parameter('min_outside_completed_ratio_for_next_region', 0.45)
+        self.declare_parameter('min_overlap_ratio_for_connectivity', 0.10)
+        self.declare_parameter('max_overlap_ratio_for_connectivity', 0.60)
+        self.declare_parameter('next_region_outward_shift_ratio', 0.50)
+        self.declare_parameter('next_region_seed_search_min_radius', 0.25)
+        self.declare_parameter('next_region_seed_search_max_radius', 1.20)
+        self.declare_parameter('next_region_seed_search_step', 0.10)
+        self.declare_parameter('next_region_seed_occupied_clearance', 0.25)
+        self.declare_parameter('max_next_region_frontier_boundary_distance', 2.0)
+        self.declare_parameter('next_region_robot_distance_penalty', 0.35)
+        self.declare_parameter('next_region_boundary_distance_penalty', 0.50)
+        self.declare_parameter('next_region_seed_adjustment_penalty', 0.25)
         self.declare_parameter('completed_region_margin', 0.5)
         self.declare_parameter('completed_region_inner_margin', 0.5)
         self.declare_parameter('checkpoint_root', 'maps/ralc_checkpoints')
@@ -59,6 +72,45 @@ class RegionManager(Node):
         self.min_new_region_outside_ratio = float(
             self.get_parameter('min_new_region_outside_ratio').value
         )
+        self.max_completed_overlap_ratio_for_next_region = float(
+            self.get_parameter('max_completed_overlap_ratio_for_next_region').value
+        )
+        self.min_outside_completed_ratio_for_next_region = float(
+            self.get_parameter('min_outside_completed_ratio_for_next_region').value
+        )
+        self.min_overlap_ratio_for_connectivity = float(
+            self.get_parameter('min_overlap_ratio_for_connectivity').value
+        )
+        self.max_overlap_ratio_for_connectivity = float(
+            self.get_parameter('max_overlap_ratio_for_connectivity').value
+        )
+        self.next_region_outward_shift_ratio = float(
+            self.get_parameter('next_region_outward_shift_ratio').value
+        )
+        self.next_region_seed_search_min_radius = float(
+            self.get_parameter('next_region_seed_search_min_radius').value
+        )
+        self.next_region_seed_search_max_radius = float(
+            self.get_parameter('next_region_seed_search_max_radius').value
+        )
+        self.next_region_seed_search_step = float(
+            self.get_parameter('next_region_seed_search_step').value
+        )
+        self.next_region_seed_occupied_clearance = float(
+            self.get_parameter('next_region_seed_occupied_clearance').value
+        )
+        self.max_next_region_frontier_boundary_distance = float(
+            self.get_parameter('max_next_region_frontier_boundary_distance').value
+        )
+        self.next_region_robot_distance_penalty = float(
+            self.get_parameter('next_region_robot_distance_penalty').value
+        )
+        self.next_region_boundary_distance_penalty = float(
+            self.get_parameter('next_region_boundary_distance_penalty').value
+        )
+        self.next_region_seed_adjustment_penalty = float(
+            self.get_parameter('next_region_seed_adjustment_penalty').value
+        )
         self.completed_region_margin = float(
             self.get_parameter('completed_region_margin').value
         )
@@ -77,6 +129,9 @@ class RegionManager(Node):
         self.last_global_frontier_cluster_count = 0
         self.next_region_id = 1
         self.initial_region_created = False
+        self.pending_next_region_center = None
+        self.pending_next_region_seed = None
+        self._next_region_reachable_mask = None
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -141,12 +196,51 @@ class RegionManager(Node):
             f'robot_neighborhood_radius={self.robot_neighborhood_radius:.2f}, '
             f'max_new_region_overlap_ratio={self.max_new_region_overlap_ratio:.2f}, '
             f'min_new_region_outside_ratio={self.min_new_region_outside_ratio:.2f}, '
+            'max_completed_overlap_ratio_for_next_region='
+            f'{self.max_completed_overlap_ratio_for_next_region:.2f}, '
+            'min_outside_completed_ratio_for_next_region='
+            f'{self.min_outside_completed_ratio_for_next_region:.2f}, '
+            f'min_overlap_ratio_for_connectivity={self.min_overlap_ratio_for_connectivity:.2f}, '
+            f'max_overlap_ratio_for_connectivity={self.max_overlap_ratio_for_connectivity:.2f}, '
+            f'next_region_outward_shift_ratio={self.next_region_outward_shift_ratio:.2f}, '
+            'next_region_seed_search='
+            f'{self.next_region_seed_search_min_radius:.2f}->'
+            f'{self.next_region_seed_search_max_radius:.2f}/'
+            f'{self.next_region_seed_search_step:.2f}, '
+            'next_region_seed_occupied_clearance='
+            f'{self.next_region_seed_occupied_clearance:.2f}, '
+            'max_next_region_frontier_boundary_distance='
+            f'{self.max_next_region_frontier_boundary_distance:.2f}, '
+            'next_region_distance_penalties='
+            f'robot:{self.next_region_robot_distance_penalty:.2f},'
+            f'boundary:{self.next_region_boundary_distance_penalty:.2f},'
+            f'adjust:{self.next_region_seed_adjustment_penalty:.2f}, '
             f'completed_region_margin={self.completed_region_margin:.2f}, '
             f'completed_region_inner_margin={self.completed_region_inner_margin:.2f}'
         )
 
     def map_callback(self, msg: OccupancyGrid):
         self.latest_map = msg
+
+    def next_region_seed_yaw(self, seed, selection) -> float:
+        cluster = selection.get('cluster') or {}
+        frontier = cluster.get('centroid')
+        if frontier is not None:
+            dx = float(frontier[0]) - float(seed[0])
+            dy = float(frontier[1]) - float(seed[1])
+            if math.hypot(dx, dy) > 1e-3:
+                return math.atan2(dy, dx)
+        center = selection.get('region_center')
+        if center is not None:
+            dx = float(center[0]) - float(seed[0])
+            dy = float(center[1]) - float(seed[1])
+            if math.hypot(dx, dy) > 1e-3:
+                return math.atan2(dy, dx)
+        return 0.0
+
+    def quaternion_z_w_from_yaw(self, yaw: float):
+        half_yaw = 0.5 * yaw
+        return math.sin(half_yaw), math.cos(half_yaw)
 
     def create_next_region_callback(self, _msg: Empty):
         robot_xy = self.lookup_robot_xy()
@@ -155,8 +249,11 @@ class RegionManager(Node):
                 '[RALC] Cannot create next region yet: robot TF unavailable.'
             )
             return
-        seed = self.choose_next_region_seed(robot_xy)
+        selection = self.choose_next_region_seed(robot_xy)
+        seed = selection['seed'] if selection is not None else None
         if seed is None:
+            self.pending_next_region_seed = None
+            self.pending_next_region_center = None
             if self.last_global_frontier_cluster_count == 0:
                 self.current_region = None
                 self.publish_all_regions_explored(True)
@@ -170,10 +267,13 @@ class RegionManager(Node):
                     '[RALC] No global frontiers remain outside completed regions.'
                 )
             else:
+                dominant_reason, dominant_count = self.dominant_candidate_rejection()
                 self.publish_all_regions_explored(False)
                 self.publish_next_region_seed_status(
-                    'NO_ACCEPTABLE_SEED',
-                    'Global frontiers exist, but no candidate seed passed filtering.',
+                    'NEXT_REGION_BLOCKED',
+                    'Global frontiers exist, but no candidate seed passed '
+                    f'filtering. dominant_rejection={dominant_reason} '
+                    f'({dominant_count} candidates).',
                 )
                 self.publish_next_region_candidate_markers()
                 self.get_logger().warn(
@@ -183,21 +283,29 @@ class RegionManager(Node):
             return
 
         self.publish_all_regions_explored(False)
+        seed_yaw = self.next_region_seed_yaw(seed, selection)
         self.publish_next_region_seed_status(
             'SEED_SELECTED',
-            f'Next region seed selected at ({seed[0]:.2f}, {seed[1]:.2f}).',
+            f'Next region seed selected at ({seed[0]:.2f}, {seed[1]:.2f}); '
+            f'planned region center=({selection["region_center"][0]:.2f}, '
+            f'{selection["region_center"][1]:.2f}), yaw={seed_yaw:.2f} rad.',
         )
         self.publish_next_region_candidate_markers(selected_seed=seed)
+        self.pending_next_region_seed = seed
+        self.pending_next_region_center = selection['region_center']
         seed_msg = PoseStamped()
         seed_msg.header.stamp = self.get_clock().now().to_msg()
         seed_msg.header.frame_id = self.map_frame
         seed_msg.pose.position.x = seed[0]
         seed_msg.pose.position.y = seed[1]
-        seed_msg.pose.orientation.w = 1.0
+        qz, qw = self.quaternion_z_w_from_yaw(seed_yaw)
+        seed_msg.pose.orientation.z = qz
+        seed_msg.pose.orientation.w = qw
         self.next_region_seed_pub.publish(seed_msg)
         self.get_logger().info(
             f'[RALC] Published next_region_seed=({seed[0]:.2f}, {seed[1]:.2f}); '
-            'active region will be created around robot after transition.'
+            f'yaw={seed_yaw:.2f} rad; active region will be created around robot '
+            'after transition.'
         )
 
     def create_region_at_robot_callback(self, _msg: Empty):
@@ -207,13 +315,19 @@ class RegionManager(Node):
                 '[RALC] Cannot create region at robot: TF unavailable.'
             )
             return
-        self.current_region = self.create_region(robot_xy[0], robot_xy[1])
+        center = self.pending_next_region_center
+        if center is None:
+            center = robot_xy
+        self.current_region = self.create_region(center[0], center[1])
+        self.pending_next_region_center = None
+        self.pending_next_region_seed = None
         self.publish_all_regions_explored(False)
         self.publish_current_region()
         self.publish_region_markers()
         self.get_logger().info(
             f'[RALC] Created ACTIVE region {self.current_region["region_id"]} '
-            f'around robot at ({robot_xy[0]:.2f}, {robot_xy[1]:.2f}).'
+            f'with center=({center[0]:.2f}, {center[1]:.2f}); '
+            f'robot=({robot_xy[0]:.2f}, {robot_xy[1]:.2f}).'
         )
 
     def mark_region_refinement_callback(self, _msg: Empty):
@@ -448,25 +562,28 @@ class RegionManager(Node):
     def choose_next_region_seed(
         self,
         robot_xy: Tuple[float, float],
-    ) -> Optional[Tuple[float, float]]:
+    ) -> Optional[dict]:
         clusters = self.global_frontier_clusters_outside_completed_regions()
         self.last_global_frontier_cluster_count = len(clusters)
         self.next_region_candidate_debug = []
         if not clusters:
+            self._next_region_reachable_mask = None
             return None
+        self._next_region_reachable_mask = self.reachable_free_mask_from_robot(robot_xy)
 
         candidate_regions = []
         for cluster in clusters:
-            for seed in self.seed_candidates_toward_frontier(robot_xy, cluster['centroid']):
-                evaluation = self.evaluate_new_region_seed(seed, cluster)
+            for seed in self.seed_candidates_for_frontier(cluster, robot_xy):
+                evaluation = self.evaluate_new_region_seed(seed, cluster, robot_xy)
                 self.next_region_candidate_debug.append(evaluation)
                 self.log_next_region_candidate(evaluation)
                 if not evaluation['accepted']:
                     continue
-                candidate_regions.append((cluster, seed))
+                candidate_regions.append((cluster, seed, evaluation))
                 break
 
         if not candidate_regions:
+            self._next_region_reachable_mask = None
             self.get_logger().warn(
                 '[RALC] No acceptable next-region seed after completed-region '
                 'overlap/margin/safety filtering.'
@@ -474,12 +591,13 @@ class RegionManager(Node):
             return None
 
         def score(candidate):
-            cluster, seed = candidate
-            distance = math.hypot(seed[0] - robot_xy[0], seed[1] - robot_xy[1])
-            information_gain = float(cluster['size'])
-            return distance - 0.04 * information_gain
+            cluster, seed, evaluation = candidate
+            return float(evaluation.get('score', 0.0))
 
-        best_cluster, best_seed = min(candidate_regions, key=score)
+        for _cluster, _seed, evaluation in candidate_regions:
+            evaluation['score'] = score((_cluster, _seed, evaluation))
+
+        best_cluster, best_seed, _best_eval = max(candidate_regions, key=score)
         for evaluation in self.next_region_candidate_debug:
             if math.hypot(
                 evaluation['seed'][0] - best_seed[0],
@@ -487,36 +605,145 @@ class RegionManager(Node):
             ) < 1e-6:
                 evaluation['selected'] = True
                 break
+        self._next_region_reachable_mask = None
         self.get_logger().info(
             '[RALC] Selected next-region seed after filtering: '
             f'seed=({best_seed[0]:.2f},{best_seed[1]:.2f}), '
             f'frontier_centroid=({best_cluster["centroid"][0]:.2f},'
-            f'{best_cluster["centroid"][1]:.2f}), size={best_cluster["size"]}'
+            f'{best_cluster["centroid"][1]:.2f}), '
+            f'region_center=({_best_eval["region_center_x"]:.2f},'
+            f'{_best_eval["region_center_y"]:.2f}), '
+            f'overlap={_best_eval["completed_overlap_ratio"]:.2f}, '
+            f'outside={_best_eval["outside_completed_ratio"]:.2f}, '
+            f'score={_best_eval["score"]:.3f}, size={best_cluster["size"]}'
         )
-        return best_seed
+        return {
+            'seed': best_seed,
+            'region_center': (
+                float(_best_eval['region_center_x']),
+                float(_best_eval['region_center_y']),
+            ),
+            'cluster': best_cluster,
+        }
 
-    def seed_candidates_toward_frontier(self, robot_xy, centroid):
-        direction_x = centroid[0] - robot_xy[0]
-        direction_y = centroid[1] - robot_xy[1]
-        norm = math.hypot(direction_x, direction_y)
+    def seed_candidates_for_frontier(self, cluster, robot_xy):
+        """Find safe navigation seeds near a frontier centroid.
+
+        The frontier centroid is the information target and may be unknown-adjacent.
+        The returned seed is a robot navigation pose, so it must be known free,
+        clear of occupied cells, and connected through known free space.
+        """
+        centroid = cluster['centroid']
+        min_radius = max(0.0, self.next_region_seed_search_min_radius)
+        max_radius = max(min_radius, self.next_region_seed_search_max_radius)
+        step = max(0.05, self.next_region_seed_search_step)
+        angle_count = 32
+
+        radius = min_radius
+        while radius <= max_radius + 1e-6:
+            ring_candidates = []
+            for idx in range(angle_count):
+                angle = (2.0 * math.pi * float(idx)) / float(angle_count)
+                candidate = (
+                    centroid[0] + radius * math.cos(angle),
+                    centroid[1] + radius * math.sin(angle),
+                )
+                if not self.seed_is_frontier_navigation_safe(candidate[0], candidate[1]):
+                    continue
+                if self.point_deep_inside_completed_region(
+                    candidate[0],
+                    candidate[1],
+                    self.completed_region_inner_margin,
+                ):
+                    continue
+                if not self.seed_reachable_from_robot(candidate, robot_xy):
+                    continue
+                ring_candidates.append(candidate)
+
+            ring_candidates = self.unique_seed_candidates(ring_candidates)
+            if ring_candidates:
+                ring_candidates.sort(
+                    key=lambda seed: (
+                        self.distance_to_completed_boundary(seed[0], seed[1]),
+                        math.hypot(seed[0] - centroid[0], seed[1] - centroid[1]),
+                    )
+                )
+                return ring_candidates
+            radius += step
+
+        return self.unique_seed_candidates([centroid])
+
+    def outward_region_center_from_frontier(self, frontier):
+        completed = self.nearest_completed_region_to_point(frontier[0], frontier[1])
+        if completed is None:
+            return frontier
+        dx = frontier[0] - float(completed['center_x'])
+        dy = frontier[1] - float(completed['center_y'])
+        norm = math.hypot(dx, dy)
         if norm < 1e-6:
-            return [centroid]
-        unit_x = direction_x / norm
-        unit_y = direction_y / norm
-        candidates = []
-        step = max(0.5, self.region_transition_step)
-        distance = step
-        while distance < norm:
-            candidates.append((
-                robot_xy[0] + distance * unit_x,
-                robot_xy[1] + distance * unit_y,
-            ))
-            distance += step
-        candidates.append(centroid)
-        return candidates
+            return frontier
+        outward_x = dx / norm
+        outward_y = dy / norm
+        return (
+            frontier[0] + outward_x * self.region_min_width * self.next_region_outward_shift_ratio,
+            frontier[1] + outward_y * self.region_min_height * self.next_region_outward_shift_ratio,
+        )
 
-    def evaluate_new_region_seed(self, seed, cluster):
-        candidate = self.region_rect_from_center(seed[0], seed[1])
+    def adjust_region_center_to_include_points(self, center, points, margin=0.0):
+        center_x = float(center[0])
+        center_y = float(center[1])
+        half_width = self.region_min_width * 0.5
+        half_height = self.region_min_height * 0.5
+        for point in points:
+            px = float(point[0])
+            py = float(point[1])
+            xmin = center_x - half_width
+            xmax = center_x + half_width
+            ymin = center_y - half_height
+            ymax = center_y + half_height
+            if px < xmin + margin:
+                center_x += px - (xmin + margin)
+            elif px > xmax - margin:
+                center_x += px - (xmax - margin)
+            if py < ymin + margin:
+                center_y += py - (ymin + margin)
+            elif py > ymax - margin:
+                center_y += py - (ymax - margin)
+        return center_x, center_y
+
+    def nearest_completed_region_to_point(self, x, y):
+        best = None
+        best_distance = None
+        for region in self.completed_regions:
+            distance = math.hypot(
+                x - float(region['center_x']),
+                y - float(region['center_y']),
+            )
+            if best_distance is None or distance < best_distance:
+                best = region
+                best_distance = distance
+        return best
+
+    def unique_seed_candidates(self, candidates):
+        unique = []
+        for candidate in candidates:
+            if any(
+                math.hypot(candidate[0] - existing[0], candidate[1] - existing[1]) < 0.05
+                for existing in unique
+            ):
+                continue
+            unique.append(candidate)
+        return unique
+
+    def evaluate_new_region_seed(self, seed, cluster, robot_xy):
+        frontier = cluster['centroid']
+        region_center = self.outward_region_center_from_frontier(frontier)
+        region_center = self.adjust_region_center_to_include_points(
+            region_center,
+            (frontier, seed),
+            margin=0.05,
+        )
+        candidate = self.region_rect_from_center(region_center[0], region_center[1])
         overlap_ratio = self.completed_overlap_ratio(candidate)
         outside_ratio = max(0.0, 1.0 - overlap_ratio)
         inside_completed = self.point_in_completed_region(seed[0], seed[1], 0.0)
@@ -527,43 +754,120 @@ class RegionManager(Node):
         )
         boundary_distance = self.distance_to_completed_boundary(seed[0], seed[1])
         frontier_distance = math.hypot(
-            seed[0] - cluster['centroid'][0],
-            seed[1] - cluster['centroid'][1],
+            seed[0] - frontier[0],
+            seed[1] - frontier[1],
+        )
+        frontier_boundary_distance = self.distance_to_completed_boundary(
+            frontier[0],
+            frontier[1],
+        )
+        robot_seed_distance = math.hypot(seed[0] - robot_xy[0], seed[1] - robot_xy[1])
+        reachable_free_ratio, unknown_ratio = self.region_map_ratios(candidate)
+        close_to_boundary = boundary_distance <= max(
+            self.region_transition_step,
+            self.completed_region_margin,
+        )
+        frontier_close_to_completed_boundary = (
+            frontier_boundary_distance <= self.max_next_region_frontier_boundary_distance
+        )
+        seed_reachable = self.seed_reachable_from_robot(seed, robot_xy)
+        has_connectivity_overlap = (
+            self.min_overlap_ratio_for_connectivity <= overlap_ratio <=
+            self.max_overlap_ratio_for_connectivity
+        )
+        connected_or_adjacent = seed_reachable
+        scoring_boundary_distance = (
+            0.0 if math.isinf(frontier_boundary_distance)
+            else frontier_boundary_distance
+        )
+        seed_known_free = self.seed_is_frontier_navigation_safe(seed[0], seed[1])
+        region_contains_seed = self.rect_contains_point(candidate, seed[0], seed[1])
+        region_contains_frontier = self.rect_contains_point(
+            candidate,
+            frontier[0],
+            frontier[1],
+        )
+        seed_cell_value = self.map_value_at_world(seed[0], seed[1])
+        score = (
+            2.0 * outside_ratio +
+            1.0 * unknown_ratio +
+            1.0 * reachable_free_ratio -
+            2.0 * abs(overlap_ratio - 0.30) -
+            self.next_region_robot_distance_penalty * robot_seed_distance -
+            self.next_region_boundary_distance_penalty * scoring_boundary_distance -
+            self.next_region_seed_adjustment_penalty * frontier_distance
         )
 
         accepted = True
         reason = 'accepted'
         marker_class = 'accepted'
 
-        if deep_inside_completed:
+        if (
+            overlap_ratio > self.max_completed_overlap_ratio_for_next_region or
+            outside_ratio < self.min_outside_completed_ratio_for_next_region
+        ):
             accepted = False
-            reason = 'inside_completed'
+            reason = 'completed_overlap_too_high'
             marker_class = 'inside_completed'
-        elif not self.seed_is_known_free(seed[0], seed[1]):
+        elif deep_inside_completed:
+            accepted = False
+            reason = 'frontier_seed_inside_completed_region'
+            marker_class = 'inside_completed'
+        elif not seed_known_free:
             accepted = False
             reason = 'unsafe_or_unknown'
             marker_class = 'unsafe_or_unknown'
-        elif overlap_ratio > self.max_new_region_overlap_ratio:
+        elif not region_contains_seed:
             accepted = False
-            reason = 'overlap_too_high'
-            marker_class = 'overlap_too_high'
-        elif outside_ratio < self.min_new_region_outside_ratio:
+            reason = 'new_region_does_not_contain_navigation_seed'
+            marker_class = 'unsafe_or_unknown'
+        elif not region_contains_frontier:
             accepted = False
-            reason = 'outside_area_too_small'
-            marker_class = 'overlap_too_high'
+            reason = 'new_region_does_not_contain_frontier'
+            marker_class = 'unsafe_or_unknown'
+        elif not connected_or_adjacent:
+            accepted = False
+            reason = 'not_connected_to_reachable_free_or_completed_boundary'
+            marker_class = 'unsafe_or_unknown'
 
         return {
             'seed': seed,
-            'frontier_centroid': cluster['centroid'],
+            'frontier_x': float(frontier[0]),
+            'frontier_y': float(frontier[1]),
+            'navigation_seed_x': float(seed[0]),
+            'navigation_seed_y': float(seed[1]),
+            'shifted_seed_x': float(seed[0]),
+            'shifted_seed_y': float(seed[1]),
+            'region_center_x': float(region_center[0]),
+            'region_center_y': float(region_center[1]),
+            'frontier_centroid': frontier,
             'frontier_size': int(cluster['size']),
             'overlap_ratio': overlap_ratio,
             'outside_ratio': outside_ratio,
+            'completed_overlap_ratio': overlap_ratio,
+            'outside_completed_ratio': outside_ratio,
+            'reachable_free_ratio': reachable_free_ratio,
+            'unknown_ratio': unknown_ratio,
             'inside_completed': inside_completed,
             'deep_inside_completed': deep_inside_completed,
+            'seed_known_free': seed_known_free,
+            'seed_cell_value': seed_cell_value,
+            'seed_reachable_from_robot': seed_reachable,
+            'region_contains_seed': region_contains_seed,
+            'region_contains_frontier': region_contains_frontier,
+            'frontier_close_to_completed_boundary': frontier_close_to_completed_boundary,
+            'has_connectivity_overlap': has_connectivity_overlap,
+            'close_to_boundary': close_to_boundary,
+            'connected_or_adjacent': connected_or_adjacent,
+            'robot_seed_distance': robot_seed_distance,
             'distance_to_completed_boundary': boundary_distance,
+            'frontier_distance_to_completed_boundary': frontier_boundary_distance,
             'distance_to_nearest_global_frontier': frontier_distance,
+            'seed_adjustment_distance': frontier_distance,
+            'score': score,
             'accepted': accepted,
             'reason': reason,
+            'rejection_reason': None if accepted else reason,
             'marker_class': marker_class,
             'selected': False,
         }
@@ -573,15 +877,40 @@ class RegionManager(Node):
         accepted_text = 'accepted' if evaluation['accepted'] else f'rejected:{evaluation["reason"]}'
         self.get_logger().info(
             '[RALC] next-region candidate: '
-            f'x={seed[0]:.2f}, y={seed[1]:.2f}, '
-            f'overlap_ratio={evaluation["overlap_ratio"]:.2f}, '
-            f'outside_ratio={evaluation["outside_ratio"]:.2f}, '
+            f'seed=({seed[0]:.2f}, {seed[1]:.2f}), '
+            f'frontier=({evaluation["frontier_x"]:.2f},'
+            f'{evaluation["frontier_y"]:.2f}), '
+            f'planned_region_center=({evaluation["region_center_x"]:.2f},'
+            f'{evaluation["region_center_y"]:.2f}), '
+            f'completed_overlap_ratio='
+            f'{evaluation["completed_overlap_ratio"]:.2f}, '
+            f'outside_completed_ratio='
+            f'{evaluation["outside_completed_ratio"]:.2f}, '
+            f'reachable_free_ratio={evaluation["reachable_free_ratio"]:.3f}, '
+            f'unknown_ratio={evaluation["unknown_ratio"]:.3f}, '
             f'inside_completed={evaluation["inside_completed"]}, '
             f'deep_inside_completed={evaluation["deep_inside_completed"]}, '
+            f'seed_known_free={evaluation["seed_known_free"]}, '
+            f'seed_cell_value={evaluation["seed_cell_value"]}, '
+            f'seed_reachable_from_robot='
+            f'{evaluation["seed_reachable_from_robot"]}, '
+            f'region_contains_seed={evaluation["region_contains_seed"]}, '
+            f'region_contains_frontier={evaluation["region_contains_frontier"]}, '
+            f'frontier_close_to_completed_boundary='
+            f'{evaluation["frontier_close_to_completed_boundary"]}, '
+            f'has_connectivity_overlap={evaluation["has_connectivity_overlap"]}, '
+            f'close_to_boundary={evaluation["close_to_boundary"]}, '
+            f'connected_or_adjacent={evaluation["connected_or_adjacent"]}, '
+            f'robot_seed_distance={evaluation["robot_seed_distance"]:.2f}, '
             f'distance_to_completed_boundary='
             f'{evaluation["distance_to_completed_boundary"]:.2f}, '
+            f'frontier_distance_to_completed_boundary='
+            f'{evaluation["frontier_distance_to_completed_boundary"]:.2f}, '
             f'distance_to_nearest_global_frontier='
             f'{evaluation["distance_to_nearest_global_frontier"]:.2f}, '
+            f'seed_adjustment_distance='
+            f'{evaluation["seed_adjustment_distance"]:.2f}, '
+            f'score={evaluation["score"]:.3f}, '
             f'{accepted_text}'
         )
 
@@ -660,6 +989,29 @@ class RegionManager(Node):
             float(origin.y + (cell_y + 0.5) * resolution),
         )
 
+    def world_to_map_cell(self, x, y):
+        if self.latest_map is None:
+            return None
+        grid = self.latest_map
+        origin = grid.info.origin.position
+        cell_x = int((x - origin.x) / grid.info.resolution)
+        cell_y = int((y - origin.y) / grid.info.resolution)
+        if (
+            cell_x < 0 or cell_x >= grid.info.width or
+            cell_y < 0 or cell_y >= grid.info.height
+        ):
+            return None
+        return cell_x, cell_y
+
+    def map_value_at_world(self, x, y):
+        cell = self.world_to_map_cell(x, y)
+        if cell is None or self.latest_map is None:
+            return None
+        data = np.array(self.latest_map.data, dtype=np.int16).reshape(
+            (self.latest_map.info.height, self.latest_map.info.width)
+        )
+        return int(data[cell[1], cell[0]])
+
     def point_in_completed_region(self, x: float, y: float, margin: float = 0.0) -> bool:
         for region in self.completed_regions:
             if (
@@ -711,6 +1063,12 @@ class RegionManager(Node):
             'ymax': center_y + half_height,
         }
 
+    def rect_contains_point(self, rect, x, y):
+        return (
+            float(rect['xmin']) <= x <= float(rect['xmax']) and
+            float(rect['ymin']) <= y <= float(rect['ymax'])
+        )
+
     def rect_overlap_ratio(self, candidate, completed):
         x_overlap = max(
             0.0,
@@ -750,6 +1108,33 @@ class RegionManager(Node):
             overlap_area += x_overlap * y_overlap
         return min(1.0, overlap_area / candidate_area)
 
+    def region_map_ratios(self, candidate):
+        if self.latest_map is None:
+            return 0.0, 0.0
+        grid = self.latest_map
+        origin = grid.info.origin.position
+        resolution = grid.info.resolution
+        xmin = max(0, int(math.floor((float(candidate['xmin']) - origin.x) / resolution)))
+        xmax = min(
+            grid.info.width,
+            int(math.ceil((float(candidate['xmax']) - origin.x) / resolution)),
+        )
+        ymin = max(0, int(math.floor((float(candidate['ymin']) - origin.y) / resolution)))
+        ymax = min(
+            grid.info.height,
+            int(math.ceil((float(candidate['ymax']) - origin.y) / resolution)),
+        )
+        if xmin >= xmax or ymin >= ymax:
+            return 0.0, 0.0
+        data = np.array(grid.data, dtype=np.int16).reshape(
+            (grid.info.height, grid.info.width)
+        )
+        region = data[ymin:ymax, xmin:xmax]
+        total = max(1, int(region.size))
+        free = int(np.count_nonzero(region == 0))
+        unknown = int(np.count_nonzero(region == -1))
+        return float(free / total), float(unknown / total)
+
     def seed_is_known_free(self, x, y):
         if self.latest_map is None:
             return False
@@ -772,6 +1157,87 @@ class RegionManager(Node):
                     return False
         return True
 
+    def seed_is_frontier_navigation_safe(self, x, y):
+        if self.latest_map is None:
+            return False
+        grid = self.latest_map
+        cell = self.world_to_map_cell(x, y)
+        if cell is None:
+            return False
+        cell_x, cell_y = cell
+        data = np.array(grid.data, dtype=np.int16).reshape(
+            (grid.info.height, grid.info.width)
+        )
+        if data[cell_y, cell_x] != 0:
+            return False
+        radius_cells = max(
+            1,
+            int(math.ceil(
+                self.next_region_seed_occupied_clearance / grid.info.resolution
+            )),
+        )
+        for yy in range(max(0, cell_y - radius_cells), min(grid.info.height, cell_y + radius_cells + 1)):
+            for xx in range(max(0, cell_x - radius_cells), min(grid.info.width, cell_x + radius_cells + 1)):
+                if data[yy, xx] > 50:
+                    return False
+        return True
+
+    def seed_reachable_from_robot(self, seed, robot_xy):
+        if self.latest_map is None:
+            return False
+        goal = self.world_to_map_cell(seed[0], seed[1])
+        if goal is None:
+            return False
+        if self._next_region_reachable_mask is not None:
+            return bool(self._next_region_reachable_mask[goal[1], goal[0]])
+        mask = self.reachable_free_mask_from_robot(robot_xy)
+        if mask is None:
+            return False
+        return bool(mask[goal[1], goal[0]])
+
+    def reachable_free_mask_from_robot(self, robot_xy):
+        if self.latest_map is None:
+            return None
+        start = self.world_to_map_cell(robot_xy[0], robot_xy[1])
+        if start is None:
+            return None
+        grid = self.latest_map
+        data = np.array(grid.data, dtype=np.int16).reshape(
+            (grid.info.height, grid.info.width)
+        )
+        start = self.nearest_free_cell(start[0], start[1], data)
+        if start is None:
+            return None
+
+        queue = deque([start])
+        visited = np.zeros(data.shape, dtype=bool)
+        visited[start[1], start[0]] = True
+        while queue:
+            x, y = queue.popleft()
+            for ny in range(y - 1, y + 2):
+                for nx in range(x - 1, x + 2):
+                    if nx == x and ny == y:
+                        continue
+                    if nx < 0 or ny < 0 or nx >= grid.info.width or ny >= grid.info.height:
+                        continue
+                    if visited[ny, nx] or data[ny, nx] != 0:
+                        continue
+                    visited[ny, nx] = True
+                    queue.append((nx, ny))
+        return visited
+
+    def nearest_free_cell(self, cell_x, cell_y, data):
+        height, width = data.shape
+        if 0 <= cell_x < width and 0 <= cell_y < height and data[cell_y, cell_x] == 0:
+            return cell_x, cell_y
+        max_radius = max(1, int(math.ceil(0.5 / self.latest_map.info.resolution)))
+        for radius in range(1, max_radius + 1):
+            for yy in range(max(0, cell_y - radius), min(height, cell_y + radius + 1)):
+                for xx in range(max(0, cell_x - radius), min(width, cell_x + radius + 1)):
+                    if data[yy, xx] == 0:
+                        return xx, yy
+        return None
+
     def region_checkpoint_path(self, region_id):
         return os.path.abspath(os.path.join(
             self.checkpoint_root, f'region_{int(region_id)}'
@@ -783,6 +1249,8 @@ class RegionManager(Node):
         self.all_regions_explored_pub.publish(msg)
 
     def publish_next_region_seed_status(self, reason: str, message: str):
+        rejection_counts = self.next_region_rejection_counts()
+        dominant_reason, dominant_count = self.dominant_candidate_rejection()
         msg = String()
         msg.data = json.dumps({
             'reason': reason,
@@ -791,9 +1259,28 @@ class RegionManager(Node):
                 self.last_global_frontier_cluster_count
             ),
             'candidate_count': len(self.next_region_candidate_debug),
+            'candidate_rejection_counts': rejection_counts,
+            'dominant_rejection_reason': dominant_reason,
+            'dominant_rejection_count': dominant_count,
         })
         self.next_region_seed_status_pub.publish(msg)
         self.get_logger().warn(f'[RALC] next_region_seed_status: {msg.data}')
+
+    def next_region_rejection_counts(self):
+        counts = {}
+        for evaluation in self.next_region_candidate_debug:
+            if evaluation.get('accepted'):
+                continue
+            reason = str(evaluation.get('reason', 'unknown'))
+            counts[reason] = counts.get(reason, 0) + 1
+        return counts
+
+    def dominant_candidate_rejection(self):
+        counts = self.next_region_rejection_counts()
+        if not counts:
+            return 'none', 0
+        reason, count = max(counts.items(), key=lambda item: item[1])
+        return reason, int(count)
 
     def publish_next_region_candidate_markers(self, selected_seed=None):
         marker_array = MarkerArray()

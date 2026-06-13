@@ -11,6 +11,7 @@
   <exec_depend>gazebo_ros</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_wfd</exec_depend>
+  <exec_depend>ralc_region_exploration</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
