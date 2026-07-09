@@ -9,8 +9,8 @@ from launch_ros.actions import Node
 
 # PPI office initial robot pose.
 # Adjust these values if the robot starts inside geometry or outside the open area.
-SPAWN_X = '1.0'
-SPAWN_Y = '-3.0'
+SPAWN_X = '-1.10'
+SPAWN_Y = '-1.67'
 SPAWN_Z = '0.3'
 SPAWN_ROLL = '0.0'
 SPAWN_PITCH = '0.0'

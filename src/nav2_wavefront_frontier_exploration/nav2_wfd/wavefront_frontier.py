@@ -19,12 +19,13 @@ from collections import deque
 from dataclasses import dataclass
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped, PoseWithCovarianceStamped
 from nav2_msgs.action import FollowWaypoints
 from nav2_msgs.srv import ManageLifecycleNodes
 from nav2_msgs.srv import GetCostmap
 from nav2_msgs.msg import Costmap
 from nav_msgs.msg  import OccupancyGrid
+from visualization_msgs.msg import Marker, MarkerArray
 
 import rclpy
 from rclpy.action import ActionClient
@@ -429,6 +430,21 @@ class WaypointFollowerTest(Node):
         self.action_client = ActionClient(self, FollowWaypoints, 'follow_waypoints')
         self.initial_pose_pub = self.create_publisher(PoseWithCovarianceStamped,
                                                       'initialpose', 10)
+        self.frontier_candidates_pub = self.create_publisher(
+            PoseArray,
+            '/frontier_candidates',
+            10
+        )
+        self.frontier_markers_pub = self.create_publisher(
+            MarkerArray,
+            '/frontier_markers',
+            10
+        )
+        self.selected_frontier_goal_pub = self.create_publisher(
+            PoseStamped,
+            '/wavefront_frontier_goal',
+            10
+        )
 
         self.costmapClient = self.create_client(GetCostmap, '/global_costmap/get_costmap')
         if not self.costmapClient.wait_for_service(timeout_sec=1.0):
@@ -491,10 +507,12 @@ class WaypointFollowerTest(Node):
             self.pruneBlacklist()
 
             if len(frontiers) == 0:
+                self.publishFrontierCandidates([])
                 self.info_msg('No More Frontiers')
                 return
 
             candidates = self.validFrontierCandidates(frontiers)
+            self.publishFrontierCandidates(candidates)
 
             if not candidates:
                 self.info_msg(
@@ -822,6 +840,7 @@ class WaypointFollowerTest(Node):
             )
 
         self.setWaypoints([candidate.goal])
+        self.publishSelectedFrontierGoal(candidate)
 
         action_request = FollowWaypoints.Goal()
         action_request.poses = self.waypoints
@@ -931,6 +950,60 @@ class WaypointFollowerTest(Node):
             f'map bounds {self.formatBounds(self.costmap)}; '
             f'costmap bounds {costmap_bounds}; '
             f'{status}'
+        )
+
+    def publishFrontierCandidates(self, candidates):
+        msg = PoseArray()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+
+        markers = MarkerArray()
+        delete_all = Marker()
+        delete_all.action = Marker.DELETEALL
+        markers.markers.append(delete_all)
+
+        for marker_id, candidate in enumerate(candidates):
+            pose = Pose()
+            pose.position.x = float(candidate.goal[0])
+            pose.position.y = float(candidate.goal[1])
+            pose.position.z = 0.0
+            pose.orientation.w = 1.0
+            msg.poses.append(pose)
+
+            marker = Marker()
+            marker.header = msg.header
+            marker.ns = 'wavefront_frontier_candidates'
+            marker.id = marker_id
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.pose = pose
+            marker.scale.x = 0.22
+            marker.scale.y = 0.22
+            marker.scale.z = 0.22
+            marker.color.r = 0.1
+            marker.color.g = 0.8
+            marker.color.b = 1.0
+            marker.color.a = 0.95
+            markers.markers.append(marker)
+
+        self.frontier_candidates_pub.publish(msg)
+        self.frontier_markers_pub.publish(markers)
+        self.info_msg(
+            f'Published {len(candidates)} actual wavefront frontier '
+            'candidates on /frontier_candidates and /frontier_markers'
+        )
+
+    def publishSelectedFrontierGoal(self, candidate):
+        if not self.waypoints:
+            return
+
+        goal = self.waypoints[0]
+        goal.header.stamp = self.get_clock().now().to_msg()
+        self.selected_frontier_goal_pub.publish(goal)
+        self.info_msg(
+            f'Published selected wavefront frontier goal '
+            f'x={candidate.goal[0]:.2f}, y={candidate.goal[1]:.2f} '
+            'on /wavefront_frontier_goal'
         )
 
     def setInitialPose(self, pose):
